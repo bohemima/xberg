@@ -370,6 +370,14 @@ def test_macos_unit_tests_reclaim_artifacts_before_libheif() -> None:
     assert "task rust:clean" in cleanup_block
 
 
+def test_xberg_unit_artifacts_are_reclaimed_before_workspace_tests() -> None:
+    script = RUST_UNIT_SCRIPT.read_text()
+    xberg = script.index('cargo test --locked --no-fail-fast -p xberg --features "$xberg_test_features"')
+    workspace = script.index('echo "=== cargo test --workspace (all features, excluding xberg) ==="', xberg)
+    between = script[xberg:workspace]
+    assert re.search(r"(?m)^  cargo clean -p xberg \|\| exit$", between) is not None
+
+
 def test_publish_contracts_run_in_ci() -> None:
     assert "python3 scripts/ci/test_publish_workflow_contracts.py" in CI_WORKFLOW.read_text()
 
@@ -386,4 +394,5 @@ if __name__ == "__main__":
     test_cli_release_enables_metal_only_for_macos_arm64()
     test_docker_preflight_checks_out_the_resolved_candidate()
     test_macos_unit_tests_reclaim_artifacts_before_libheif()
+    test_xberg_unit_artifacts_are_reclaimed_before_workspace_tests()
     test_publish_contracts_run_in_ci()

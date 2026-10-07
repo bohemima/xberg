@@ -114,6 +114,12 @@ if ! {
   fi
   RUST_BACKTRACE=full cargo test --locked --no-fail-fast -p xberg --features "$xberg_test_features" --all-targets --verbose || exit
 
+  # This leg links hundreds of integration-test binaries and benches. Keeping those completed
+  # package outputs beside the different all-features workspace closure exhausted 109 GiB of
+  # free space on ubuntu-latest. Remove only xberg's outputs; dependencies stay warm, and the
+  # next leg must rebuild xberg with its own feature closure anyway. ~keep
+  cargo clean -p xberg || exit
+
   echo "=== cargo test --workspace (all features, excluding xberg) ==="
   extra_excludes=()
   # xberg-candle-ocr: --all-features turns on cuda and metal together, and they are
