@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.7] - 2026-10-07
+
+### Fixed
+
+- **(python, pdf): Python post-processors preserve formatted output and hide internal PDF heading annotations.**
+  Returning an `ExtractedDocument` from a Python post-processor no longer replaces Rust-only document state, so a
+  no-op processor keeps rendered headings and chunks. Font-size annotations used for native PDF heading detection are
+  also excluded from plain text and keyword extraction. (GH#2050)
+
 ## [1.3.6] - 2026-10-07
 
 ### Changed
