@@ -25,7 +25,7 @@
 
 use crate::types::document_structure::{ContentLayer, RelationshipKind};
 use crate::types::extraction::BoundingBox;
-use crate::types::internal::{ElementKind, InternalDocument, RelationshipTarget};
+use crate::types::internal::{ElementKind, InternalDocument, InternalElement, RelationshipTarget};
 use ahash::AHashMap;
 
 use super::common::{get_admonition_kind, get_admonition_title, normalize_inline_text, parse_metadata_entries};
@@ -46,152 +46,18 @@ pub(crate) fn render_doctags(doc: &InternalDocument) -> String {
     let mut out = String::with_capacity(doc.elements.len() * AVG_ELEMENT_BYTES);
     let captions = collect_captions(doc);
     let dims = page_dimensions(doc);
+    let context = RenderContext {
+        doc,
+        captions: &captions,
+        dims: &dims,
+    };
 
     out.push_str("<doctag>");
 
     let mut state = ListState::default();
 
     for (index, elem) in doc.elements.iter().enumerate() {
-        let index = index as u32;
-
-        // Captions are emitted nested inside the element they describe.
-        if captions.sources.contains_key(&index) {
-            continue;
-        }
-
-        let loc = element_loc(elem, &dims);
-        let loc = loc.as_deref();
-
-        match elem.kind {
-            ElementKind::ListItem { ordered } => {
-                state.open(&mut out, ordered);
-                // DocTags' `list_item` tag carries no separate marker slot -- a literal
-                // source label (e.g. "B.", "(a)") that the auto `ordered` container alone
-                // cannot express is prefixed onto the visible text instead, exactly as the
-                // other text-based renderers (comrak/markdown, djot, plain) do.
-                let text = match elem.list_item_source_label() {
-                    Some(label) if !label.is_empty() => format!("{label} {}", elem.text),
-                    _ => elem.text.clone(),
-                };
-                push_element(&mut out, "list_item", loc, &normalize_inline_text(&text), None);
-                continue;
-            }
-            ElementKind::ListStart { ordered } => {
-                state.open_explicit(&mut out, ordered);
-                continue;
-            }
-            ElementKind::ListEnd => {
-                state.close_explicit(&mut out);
-                continue;
-            }
-            _ => state.close_implicit(&mut out),
-        }
-
-        match elem.kind {
-            ElementKind::QuoteStart | ElementKind::QuoteEnd | ElementKind::GroupStart | ElementKind::GroupEnd => {}
-            // The marker itself carries no content DocTags can address — the reference is
-            // resolved through `Relationship`, and the definition is emitted on its own below.
-            //
-            // `CommentDefinition` is deliberately NOT dropped alongside these, which is where
-            // this diverges from #1408. That fix reasoned that plain, djot and the comrak
-            // bridge drop reviewer comments here too — true of this first match, but each of
-            // them re-emits the body in a later pass (plain.rs:232 for the footnote layer,
-            // djot.rs:259, comrak_bridge.rs:1024), and json.rs:385 / html_styled.rs:369 emit
-            // it directly. This renderer has no second pass, so dropping it here would make
-            // DocTags the only renderer that loses the comment text outright. It falls
-            // through to the text arm below instead.
-            ElementKind::FootnoteRef | ElementKind::CommentRef => {}
-            ElementKind::PageBreak => {
-                out.push_str("<page_break>\n");
-            }
-            ElementKind::Table { table_index } => {
-                let rendered = match doc.tables.get(table_index as usize) {
-                    Some(table) => {
-                        let caption = captions.caption_payload(doc, index, &dims);
-                        push_otsl(&mut out, &table.cells, loc, caption.as_deref())
-                    }
-                    None => false,
-                };
-                // `push_otsl` drops empty/degenerate tables (no cells, or no columns).
-                // Unlike Image and Code, which always call `push_element` and so always
-                // carry a nested `<caption>`, a dropped table takes its caption down with
-                // it unless it is rescued here. This mirrors the parser's own philosophy
-                // (`extraction/doctags.rs`): a caption whose target was dropped still
-                // carries text, so it stays as an ordinary text element.
-                if !rendered {
-                    push_orphaned_caption(&mut out, doc, &captions, index, &dims);
-                }
-            }
-            ElementKind::Image { image_index } => {
-                let described = doc
-                    .images
-                    .get(image_index as usize)
-                    .and_then(|img| img.description.as_deref())
-                    .filter(|desc| !desc.is_empty());
-                let caption = captions
-                    .caption_payload(doc, index, &dims)
-                    .or_else(|| described.map(|desc| normalize_inline_text(desc).into_owned()));
-                push_element(&mut out, "picture", loc, "", caption.as_deref());
-            }
-            ElementKind::Code => {
-                let body = code_body(super::common::get_language(elem), &elem.text);
-                let caption = captions.caption_payload(doc, index, &dims);
-                push_element(&mut out, "code", loc, &body, caption.as_deref());
-            }
-            ElementKind::Formula => {
-                push_element(&mut out, "formula", loc, &normalize_inline_text(&elem.text), None);
-            }
-            ElementKind::Admonition => {
-                // `InternalDocumentBuilder::push_admonition` stores exactly one string —
-                // `elem.text` is set to `title.unwrap_or(kind)` at construction, and
-                // `get_admonition_title`/`get_admonition_kind` read the same "title"/"kind"
-                // attributes back out. There is no separate body to distinguish from the
-                // label, and DocTags itself has no admonition/callout tag (the vendored
-                // Docling corpus has none), so this renders as an ordinary text element,
-                // exactly once. ~keep
-                let label = get_admonition_title(elem).unwrap_or_else(|| get_admonition_kind(elem));
-                push_text_element(&mut out, elem.layer, loc, &normalize_inline_text(label));
-            }
-            ElementKind::MetadataBlock => {
-                let entries = parse_metadata_entries(&elem.text);
-                if entries.is_empty() {
-                    push_text_element(&mut out, elem.layer, loc, &normalize_inline_text(&elem.text));
-                } else {
-                    for (key, value) in entries {
-                        push_text_element(&mut out, elem.layer, loc, &format!("{}: {}", key, value));
-                    }
-                }
-            }
-            ElementKind::RawBlock => {
-                let body = code_body(None, &elem.text);
-                push_element(&mut out, "code", loc, &body, None);
-            }
-            ElementKind::Title => {
-                push_labelled(&mut out, elem.layer, loc, "title", &normalize_inline_text(&elem.text));
-            }
-            ElementKind::Heading { level } => {
-                let tag = format!("section_header_level_{}", level.max(1));
-                push_labelled(&mut out, elem.layer, loc, &tag, &normalize_inline_text(&elem.text));
-            }
-            ElementKind::FootnoteDefinition => {
-                push_element(&mut out, "footnote", loc, &normalize_inline_text(&elem.text), None);
-            }
-            // DocTags has no comment tag, so the definition renders through its content
-            // layer: `<footnote>` when the extractor marked it as such, `<text>` otherwise.
-            // Dropping it instead would lose the text outright — unlike the plain and comrak
-            // renderers, this one has no second pass that re-emits comment bodies.
-            ElementKind::CommentDefinition
-            | ElementKind::Paragraph
-            | ElementKind::Citation
-            | ElementKind::Slide { .. }
-            | ElementKind::DefinitionTerm
-            | ElementKind::DefinitionDescription
-            | ElementKind::OcrText { .. } => {
-                push_text_element(&mut out, elem.layer, loc, &normalize_inline_text(&elem.text));
-            }
-            // Handled above.
-            ElementKind::ListItem { .. } | ElementKind::ListStart { .. } | ElementKind::ListEnd => {}
-        }
+        render_element(&context, index as u32, elem, &mut state, &mut out);
     }
 
     state.close_implicit(&mut out);
@@ -199,6 +65,180 @@ pub(crate) fn render_doctags(doc: &InternalDocument) -> String {
 
     out.push_str("</doctag>");
     out
+}
+
+struct RenderContext<'a> {
+    doc: &'a InternalDocument,
+    captions: &'a Captions,
+    dims: &'a AHashMap<u32, (f64, f64)>,
+}
+
+fn render_element(
+    context: &RenderContext<'_>,
+    index: u32,
+    elem: &InternalElement,
+    state: &mut ListState,
+    out: &mut String,
+) {
+    // Captions are emitted nested inside the element they describe.
+    if context.captions.sources.contains_key(&index) {
+        return;
+    }
+
+    let loc = element_loc(elem, context.dims);
+    let loc = loc.as_deref();
+    if render_list_element(elem, loc, state, out) {
+        return;
+    }
+
+    state.close_implicit(out);
+    render_non_list_element(context, index, elem, loc, out);
+}
+
+fn render_list_element(elem: &InternalElement, loc: Option<&str>, state: &mut ListState, out: &mut String) -> bool {
+    match elem.kind {
+        ElementKind::ListItem { ordered } => {
+            state.open(out, ordered);
+            // DocTags' `list_item` tag carries no separate marker slot -- a literal
+            // source label (e.g. "B.", "(a)") that the auto `ordered` container alone
+            // cannot express is prefixed onto the visible text instead, exactly as the
+            // other text-based renderers (comrak/markdown, djot, plain) do.
+            let text = match elem.list_item_source_label() {
+                Some(label) if !label.is_empty() => format!("{label} {}", elem.text),
+                _ => elem.text.clone(),
+            };
+            push_element(out, "list_item", loc, &normalize_inline_text(&text), None);
+            true
+        }
+        ElementKind::ListStart { ordered } => {
+            state.open_explicit(out, ordered);
+            true
+        }
+        ElementKind::ListEnd => {
+            state.close_explicit(out);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn render_non_list_element(
+    context: &RenderContext<'_>,
+    index: u32,
+    elem: &InternalElement,
+    loc: Option<&str>,
+    out: &mut String,
+) {
+    match elem.kind {
+        ElementKind::QuoteStart | ElementKind::QuoteEnd | ElementKind::GroupStart | ElementKind::GroupEnd => {}
+        // The marker itself carries no content DocTags can address — the reference is
+        // resolved through `Relationship`, and the definition is emitted on its own below.
+        //
+        // `CommentDefinition` is deliberately NOT dropped alongside these, which is where
+        // this diverges from #1408. That fix reasoned that plain, djot and the comrak
+        // bridge drop reviewer comments here too — true of this first match, but each of
+        // them re-emits the body in a later pass (plain.rs:232 for the footnote layer,
+        // djot.rs:259, comrak_bridge.rs:1024), and json.rs:385 / html_styled.rs:369 emit
+        // it directly. This renderer has no second pass, so dropping it here would make
+        // DocTags the only renderer that loses the comment text outright. It falls
+        // through to the text arm below instead.
+        ElementKind::FootnoteRef | ElementKind::CommentRef => {}
+        ElementKind::PageBreak => out.push_str("<page_break>\n"),
+        ElementKind::Table { table_index } => render_table(context, index, table_index, loc, out),
+        ElementKind::Image { image_index } => render_image(context, index, image_index, loc, out),
+        ElementKind::Code => render_code(context, index, elem, loc, out),
+        ElementKind::Formula => push_element(out, "formula", loc, &normalize_inline_text(&elem.text), None),
+        ElementKind::Admonition => render_admonition(elem, loc, out),
+        ElementKind::MetadataBlock => render_metadata(elem, loc, out),
+        ElementKind::RawBlock => {
+            let body = code_body(None, &elem.text);
+            push_element(out, "code", loc, &body, None);
+        }
+        ElementKind::Title => push_labelled(out, elem.layer, loc, "title", &normalize_inline_text(&elem.text)),
+        ElementKind::Heading { level } => {
+            let tag = format!("section_header_level_{}", level.max(1));
+            push_labelled(out, elem.layer, loc, &tag, &normalize_inline_text(&elem.text));
+        }
+        ElementKind::FootnoteDefinition => {
+            push_element(out, "footnote", loc, &normalize_inline_text(&elem.text), None);
+        }
+        // DocTags has no comment tag, so the definition renders through its content
+        // layer: `<footnote>` when the extractor marked it as such, `<text>` otherwise.
+        // Dropping it instead would lose the text outright — unlike the plain and comrak
+        // renderers, this one has no second pass that re-emits comment bodies.
+        ElementKind::CommentDefinition
+        | ElementKind::Paragraph
+        | ElementKind::Citation
+        | ElementKind::Slide { .. }
+        | ElementKind::DefinitionTerm
+        | ElementKind::DefinitionDescription
+        | ElementKind::OcrText { .. } => {
+            push_text_element(out, elem.layer, loc, &normalize_inline_text(&elem.text));
+        }
+        ElementKind::ListItem { .. } | ElementKind::ListStart { .. } | ElementKind::ListEnd => {}
+    }
+}
+
+fn render_table(context: &RenderContext<'_>, index: u32, table_index: u32, loc: Option<&str>, out: &mut String) {
+    let rendered = match context.doc.tables.get(table_index as usize) {
+        Some(table) => {
+            let caption = context.captions.caption_payload(context.doc, index, context.dims);
+            push_otsl(out, &table.cells, loc, caption.as_deref())
+        }
+        None => false,
+    };
+    // `push_otsl` drops empty/degenerate tables (no cells, or no columns).
+    // Unlike Image and Code, which always call `push_element` and so always
+    // carry a nested `<caption>`, a dropped table takes its caption down with
+    // it unless it is rescued here. This mirrors the parser's own philosophy
+    // (`extraction/doctags.rs`): a caption whose target was dropped still
+    // carries text, so it stays as an ordinary text element.
+    if !rendered {
+        push_orphaned_caption(out, context.doc, context.captions, index, context.dims);
+    }
+}
+
+fn render_image(context: &RenderContext<'_>, index: u32, image_index: u32, loc: Option<&str>, out: &mut String) {
+    let described = context
+        .doc
+        .images
+        .get(image_index as usize)
+        .and_then(|image| image.description.as_deref())
+        .filter(|description| !description.is_empty());
+    let caption = context
+        .captions
+        .caption_payload(context.doc, index, context.dims)
+        .or_else(|| described.map(|description| normalize_inline_text(description).into_owned()));
+    push_element(out, "picture", loc, "", caption.as_deref());
+}
+
+fn render_code(context: &RenderContext<'_>, index: u32, elem: &InternalElement, loc: Option<&str>, out: &mut String) {
+    let body = code_body(super::common::get_language(elem), &elem.text);
+    let caption = context.captions.caption_payload(context.doc, index, context.dims);
+    push_element(out, "code", loc, &body, caption.as_deref());
+}
+
+fn render_admonition(elem: &InternalElement, loc: Option<&str>, out: &mut String) {
+    // `InternalDocumentBuilder::push_admonition` stores exactly one string —
+    // `elem.text` is set to `title.unwrap_or(kind)` at construction, and
+    // `get_admonition_title`/`get_admonition_kind` read the same "title"/"kind"
+    // attributes back out. There is no separate body to distinguish from the
+    // label, and DocTags itself has no admonition/callout tag (the vendored
+    // Docling corpus has none), so this renders as an ordinary text element,
+    // exactly once. ~keep
+    let label = get_admonition_title(elem).unwrap_or_else(|| get_admonition_kind(elem));
+    push_text_element(out, elem.layer, loc, &normalize_inline_text(label));
+}
+
+fn render_metadata(elem: &InternalElement, loc: Option<&str>, out: &mut String) {
+    let entries = parse_metadata_entries(&elem.text);
+    if entries.is_empty() {
+        push_text_element(out, elem.layer, loc, &normalize_inline_text(&elem.text));
+        return;
+    }
+    for (key, value) in entries {
+        push_text_element(out, elem.layer, loc, &format!("{}: {}", key, value));
+    }
 }
 
 /// Tracks open `<ordered_list>` / `<unordered_list>` wrappers.

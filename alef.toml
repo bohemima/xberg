@@ -1060,7 +1060,6 @@ traineddata = "traineddata"
   "nesting-too-deep",
 ]
 "crates/xberg/src/rendering/djot.rs" = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
-"crates/xberg/src/rendering/doctags.rs" = ["function-too-long"]
 "crates/xberg/src/rendering/plain.rs" = ["cyclomatic-complexity", "function-too-long", "nesting-too-deep"]
 "crates/xberg/src/reranking/mod.rs" = ["file-too-long", "function-too-long", "too-many-parameters"]
 "crates/xberg/src/sceptre_ocr/mod.rs" = ["file-too-long"]
