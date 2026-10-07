@@ -250,9 +250,10 @@ runs:
             ;;
         esac
 
-        # Build benchmark-harness
-        echo "Running: cargo build --locked --manifest-path tools/benchmark-harness/Cargo.toml $BUILD_ARG"
-        if ! cargo build --locked --manifest-path tools/benchmark-harness/Cargo.toml $BUILD_ARG; then
+        # The package has three binaries, but this action caches and uploads only benchmark-harness.
+        # Restricting the target avoids three concurrent fat-LTO links on constrained ARM runners. ~keep
+        echo "Running: cargo build --locked --manifest-path tools/benchmark-harness/Cargo.toml --bin benchmark-harness $BUILD_ARG"
+        if ! cargo build --locked --manifest-path tools/benchmark-harness/Cargo.toml --bin benchmark-harness $BUILD_ARG; then
           echo "❌ Build failed for benchmark-harness"
           exit 1
         fi

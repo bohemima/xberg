@@ -82,6 +82,18 @@ require_no_cli_build() {
   fi
 }
 
+require_exact_harness_build() {
+  local action="$1"
+  local expected="cargo build --locked --manifest-path tools/benchmark-harness/Cargo.toml --bin benchmark-harness \$BUILD_ARG"
+  local command_count
+
+  command_count="$(grep -Foc "$expected" <<<"$action" || true)"
+  if [[ "$command_count" -ne 2 ]]; then
+    echo "benchmark workflow validation failed: harness cache must build only the uploaded benchmark-harness binary"
+    exit 1
+  fi
+}
+
 require_step() {
   local job="$1"
   local pattern="$2"
@@ -127,5 +139,7 @@ for cache_input in 'BUILD_ENV_HASH=' 'RUSTFLAGS:-' 'CARGO_BUILD_TARGET:-' 'rustc
     exit 1
   fi
 done
+
+require_exact_harness_build "$cache_action_content"
 
 echo "benchmark workflow build configuration is valid"
