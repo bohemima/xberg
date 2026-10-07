@@ -54,7 +54,11 @@ pub fn build(b: *std.Build) void {
             .stdout = .pipe,
             .stderr = .inherit,
         });
-        if (_spawned) |_child| {
+        if (_spawned) |_child_value| {
+            // The server treats stdin EOF as shutdown, so retain the child and its stdin
+            // pipe through execution of every test run step. ~keep
+            const _child = _alloc.create(@TypeOf(_child_value)) catch @panic("failed to retain mock-server child");
+            _child.* = _child_value;
             // The child is intentionally not awaited: it lives for the duration
             // of the `zig build` process, which spans test execution.
             const _stdout = _child.stdout.?;

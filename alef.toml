@@ -6,7 +6,7 @@
 # for. 0.83.0 additionally fixes the php/napi/pyo3 mirror defaults, the elixir bytes
 # hop and the typescript/wasm mock-url builder that this repo's e2e legs were red on.
 # ~keep
-alef_version = "0.107.1"
+alef_version = "0.107.2"
 languages = [
   "python",
   "node",
@@ -363,6 +363,10 @@ exclude = [
   # remove this exclude to "fix" that read without first replacing execution+freshness with
   # something at least as strong. ~keep
   "e2e/**",
+  # Alef formats this generated build file with the required Zig 0.17 formatter. Poly 0.28.2
+  # still applies the pre-0.17 continuation indentation and would undo Zig's canonical output;
+  # compilation and Alef freshness remain the authoritative checks. ~keep
+  "packages/zig/build.zig",
   "**/*.diff",
   "**/*.patch",
   "**/frb_generated.rs",

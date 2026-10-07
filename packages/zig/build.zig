@@ -10,22 +10,22 @@ pub fn build(b: *std.Build) void {
     // Override with -Dffi_path=... and -Dffi_include_path=... if your layout differs.
     const ffi_path_option = b.option([]const u8, "ffi_path", "Path to directory containing libxberg_ffi.{dylib,so,dll,a}") orelse "../../target/release";
     const ffi_path: std.Build.LazyPath = if (std.fs.path.isAbsolute(ffi_path_option))
-    .{ .cwd_relative = ffi_path_option }
+        .{ .cwd_relative = ffi_path_option }
     else
-    b.path(ffi_path_option);
+        b.path(ffi_path_option);
 
     const ffi_include_option = b.option([]const u8, "ffi_include_path", "Path to directory containing the FFI C header") orelse "../../crates/xberg-ffi/include";
     const ffi_include: std.Build.LazyPath = if (std.fs.path.isAbsolute(ffi_include_option))
-    .{ .cwd_relative = ffi_include_option }
+        .{ .cwd_relative = ffi_include_option }
     else
-    b.path(ffi_include_option);
+        b.path(ffi_include_option);
 
     const ffi_header = b.pathJoin(&.{ ffi_include_option, "xberg.h" });
     const translate_c = b.addTranslateC(.{
         .root_source_file = if (std.fs.path.isAbsolute(ffi_header))
-        .{ .cwd_relative = ffi_header }
+            .{ .cwd_relative = ffi_header }
         else
-        b.path(ffi_header),
+            b.path(ffi_header),
         .target = target,
         .optimize = optimize,
     });

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.3.7] - 2026-10-07
+## [1.3.7] - 2026-10-08
 
 ### Fixed
 
@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **(pdf): conflicting JPEG 2000 palette color spaces fail consistently across architectures.** Native PDF extraction
   now rejects a codestream palette whose component count conflicts with an explicit `/ColorSpace`, instead of relying
   on architecture-dependent decoder rounding that could accept the same malformed image on ARM and reject it on x86.
+- **(zig): generated bindings compile with Zig 0.17.** String duplication now uses the Zig 0.17 sentinel API, and
+  plugin vtables cross the C ABI through layout-compatible pointers instead of rejected value bitcasts.
 
 ## [1.3.6] - 2026-10-07
 
