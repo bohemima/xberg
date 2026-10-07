@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Returning an `ExtractedDocument` from a Python post-processor no longer replaces Rust-only document state, so a
   no-op processor keeps rendered headings and chunks. Font-size annotations used for native PDF heading detection are
   also excluded from plain text and keyword extraction. (GH#2050)
+- **(pdf): conflicting JPEG 2000 palette color spaces fail consistently across architectures.** Native PDF extraction
+  now rejects a codestream palette whose component count conflicts with an explicit `/ColorSpace`, instead of relying
+  on architecture-dependent decoder rounding that could accept the same malformed image on ARM and reject it on x86.
 
 ## [1.3.6] - 2026-10-07
 

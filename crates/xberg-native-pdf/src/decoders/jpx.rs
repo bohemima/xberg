@@ -174,9 +174,10 @@ pub struct CodestreamPalette {
 /// the only shape xberg resolves itself: 8-bit unsigned entries, at most 256 of them, 1, 3 or 4
 /// columns in order, and a colour specification that is grey, sRGB or CMYK when it names one.
 ///
-/// hayro-jpeg2000 0.4 resolves this palette without clamping, so one lossily coded index just past
-/// the last entry fails the whole image (GH#1903). Reading it here lets the caller clamp the
-/// indices and look them up in it, in the palette's own colour space. Any
+/// hayro-jpeg2000 0.4 resolves this palette without clamping, so a lossily coded index near the
+/// last entry can either fail or resolve differently with architecture-specific floating-point
+/// rounding (GH#1903). Reading it here lets the caller clamp the indices and look them up in it,
+/// in the palette's own colour space. Any
 /// other shape returns `None` and decodes as before. ~keep
 pub fn codestream_palette(bytes: &[u8]) -> Option<CodestreamPalette> {
     let header = find_box(bytes, b"jp2h")?;
@@ -317,9 +318,9 @@ pub fn decode_jpx(bytes: &[u8], declared_components: Option<u8>) -> Result<JpxIm
 /// JPEG 2000 data, and a `pclr` palette box is one: pdf.js decodes such an image with the
 /// codestream palette switched off for the same reason. It is also the only way these images
 /// decode at all. A lossily coded index plane rings around every edge, so samples land a little
-/// outside `0..=255`; hayro-jpeg2000 0.4 looks each one up unclamped and fails the whole image
-/// with `PaletteResolutionFailed`. Rounding and clamping to `highest_index`, the last entry the
-/// dictionary's palette holds, maps that ringing to the nearest real index instead. ~keep
+/// outside `0..=255`; hayro-jpeg2000 0.4 looks each one up unclamped, which can fail or produce
+/// architecture-dependent output. Rounding and clamping to `highest_index`, the last entry the
+/// dictionary's palette holds, maps that ringing to the nearest real index deterministically. ~keep
 ///
 /// The index plane is the first component. hayro-jpeg2000 reports the colour channels it found,
 /// and with palette resolution off it reports an image carrying a `pclr` box as one grey channel
@@ -538,18 +539,6 @@ mod tests {
     /// A lossily coded index plane for a 16-entry palette, ink at index 0 and paper at 15, in a plain
     /// greyscale JP2. The lossy coding rings samples up to 16, one past the last palette entry. ~keep
     const HIVAL15_LOSSY_JP2: &[u8] = include_bytes!("../../tests/fixtures/jpx/gh1885_hival15_lossy.jp2");
-
-    /// NEGATIVE CONTROL pinning the upstream failure: resolving the codestream palette fails the
-    /// whole image. If this ever passes, hayro-jpeg2000 clamps out-of-range indices itself. ~keep
-    #[test]
-    fn a_lossy_palette_codestream_fails_when_the_decoder_resolves_its_palette() {
-        let err = decode_jpx(PALETTE_CMYK_JP2, Some(1))
-            .expect_err("negative control: the codestream palette lookup must fail on out-of-range indices");
-        assert!(
-            format!("{err:?}").contains("PaletteResolutionFailed"),
-            "unexpected failure: {err:?}"
-        );
-    }
 
     #[test]
     fn a_lossy_palette_codestream_decodes_to_clamped_indices() {

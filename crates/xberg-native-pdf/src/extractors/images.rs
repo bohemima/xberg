@@ -3165,7 +3165,7 @@ fn decode_jpx_image(
     let codestream_palette = if indexed.is_some() {
         None
     } else {
-        codestream_palette_resolution(&codestream, color_space, color_space_is_placeholder)
+        codestream_palette_resolution(&codestream, color_space, color_space_is_placeholder)?
     };
     if let Some(highest_index) = indexed
         .or(codestream_palette.as_ref())
@@ -3267,33 +3267,43 @@ struct JpxDecoded {
 
 /// The codestream's own `pclr` palette as an [`IndexedResolution`], when the image dictionary
 /// leaves room for it: it named no `/ColorSpace`, or a device space with as many components as a
-/// palette entry. Any other declared space is authoritative (ISO 32000-1 §7.4.9) and decodes as
-/// before. ~keep
+/// palette entry. Any other declared space is authoritative (ISO 32000-1 §7.4.9): a component
+/// count mismatch is rejected, while an equal-width non-device space decodes as before. ~keep
 fn codestream_palette_resolution(
     codestream: &[u8],
     color_space: &ColorSpace,
     color_space_is_placeholder: bool,
-) -> Option<IndexedResolution> {
-    let palette = crate::decoders::jpx::codestream_palette(codestream)?;
+) -> Result<Option<IndexedResolution>> {
+    let Some(palette) = crate::decoders::jpx::codestream_palette(codestream) else {
+        return Ok(None);
+    };
     let base_fmt = match palette.columns {
         1 => PixelFormat::Grayscale,
         3 => PixelFormat::RGB,
         4 => PixelFormat::CMYK,
-        _ => return None,
+        _ => return Ok(None),
     };
-    let declared_fits = matches!(
+    let component_count_fits = color_space.components() == usize::from(palette.columns);
+    if !color_space_is_placeholder && !component_count_fits {
+        return Err(Error::UnsupportedFilter(format!(
+            "JPXDecode: codestream palette has {} components, but /ColorSpace has {}",
+            palette.columns,
+            color_space.components()
+        )));
+    }
+    let declared_is_device = matches!(
         color_space,
         ColorSpace::DeviceGray | ColorSpace::DeviceRGB | ColorSpace::DeviceCMYK
-    ) && color_space.components() == usize::from(palette.columns);
-    if !color_space_is_placeholder && !declared_fits {
-        return None;
+    );
+    if !color_space_is_placeholder && !declared_is_device {
+        return Ok(None);
     }
-    Some(IndexedResolution {
+    Ok(Some(IndexedResolution {
         base_fmt,
         components: usize::from(palette.columns),
         palette: palette.entries,
         base_profile: None,
-    })
+    }))
 }
 
 /// Expand an inline image's abbreviated dictionary (ISO 32000-1 §8.9.7 Table 91)
@@ -5366,8 +5376,7 @@ mod palette_expansion_tests {
             assert_eq!(image.bits_per_component(), 8, "{label}");
         }
 
-        // A declared space the palette does not fit stays authoritative, and the decoder's own
-        // unclamped lookup still refuses the lossy plane.
+        // A declared space the palette does not fit stays authoritative. ~keep
         let err = extract_image_from_xobject(
             None,
             &jpx_xobject(Some(Object::Name("DeviceRGB".to_string()))),
@@ -5376,7 +5385,7 @@ mod palette_expansion_tests {
         )
         .expect_err("a four-column palette does not fit /DeviceRGB");
         assert!(
-            format!("{err:?}").contains("PaletteResolutionFailed"),
+            format!("{err:?}").contains("codestream palette has 4 components, but /ColorSpace has 3"),
             "unexpected failure: {err:?}"
         );
     }
