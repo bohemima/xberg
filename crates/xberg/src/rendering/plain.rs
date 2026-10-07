@@ -51,7 +51,10 @@ pub(crate) fn render_plain(doc: &InternalDocument) -> String {
                         out.push_str(&indent);
                     }
 
-                    if let (true, Some(attrs)) = (matches!(elem.kind, ElementKind::Heading { .. }), &elem.attributes) {
+                    if let (true, Some(attrs)) = (
+                        matches!(elem.kind, ElementKind::Heading { .. }),
+                        elem.public_attributes(),
+                    ) {
                         out.push_str(&elem.text);
                         let mut filtered_attrs: Vec<_> = attrs
                             .iter()
@@ -521,6 +524,23 @@ mod tests {
         let doc = b.build();
         let out = render_plain(&doc);
         assert_eq!(out, "Hello world");
+    }
+
+    #[test]
+    fn render_plain_excludes_internal_heading_attributes() {
+        use ahash::AHashMap;
+
+        let mut b = InternalDocumentBuilder::new("test");
+        let heading = b.push_heading(1, "Service agreement", None, None);
+        b.set_attributes(
+            heading,
+            AHashMap::from_iter([
+                ("xberg:internal:font-size-pt".to_string(), "18".to_string()),
+                ("role".to_string(), "contract".to_string()),
+            ]),
+        );
+
+        assert_eq!(render_plain(&b.build()), "Service agreement (role: contract)");
     }
 
     #[test]
