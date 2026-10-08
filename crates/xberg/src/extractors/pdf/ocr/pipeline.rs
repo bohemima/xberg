@@ -1111,12 +1111,17 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
                 let source_dpi = rendered_page_source_dpi(&render_doc, *page_idx, *width);
                 let whole_page_raster =
                     crate::pdf::scan_detect::full_page_raster_density(&render_doc, *page_idx).is_some();
+                #[cfg(feature = "layout-detection")]
+                let layout_assembly = detection_for_mixed_route_page(layout_detections_for_mixed, *page_idx).is_some();
+                #[cfg(not(feature = "layout-detection"))]
+                let layout_assembly = false;
                 let config_clone = ocr_config_with_page_rotation_hint(
                     &ocr_config_owned,
                     page_rotation_degrees,
                     source_dpi,
                     whole_page_raster,
                     single_block_pages.contains(&(*page_idx as u32 + 1)),
+                    layout_assembly,
                 )
                 .into_owned();
                 let (upright_data, upright_width, upright_height, correction_degrees) = match upright_raster_for_backend(
@@ -1254,12 +1259,17 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
                 let source_dpi = rendered_page_source_dpi(&render_doc, *page_idx, *width);
                 let whole_page_raster =
                     crate::pdf::scan_detect::full_page_raster_density(&render_doc, *page_idx).is_some();
+                #[cfg(feature = "layout-detection")]
+                let layout_assembly = detection_for_mixed_route_page(layout_detections_for_mixed, *page_idx).is_some();
+                #[cfg(not(feature = "layout-detection"))]
+                let layout_assembly = false;
                 let config_for_page = ocr_config_with_page_rotation_hint(
                     &ocr_config_owned,
                     page_rotation_degrees,
                     source_dpi,
                     whole_page_raster,
                     single_block_pages.contains(&(*page_idx as u32 + 1)),
+                    layout_assembly,
                 );
                 let (upright_data, upright_width, upright_height, correction_degrees) = match upright_raster_for_backend(
                     data,
@@ -2556,6 +2566,7 @@ pub(super) async fn extract_with_ocr_for_page(
                     source_dpi,
                     whole_page_raster,
                     prefer_single_block,
+                    layout_detections.is_some(),
                 )
                 .into_owned();
                 // No PDF `/Rotate` is ever known without the `pdf` feature (`page_rotation_degrees`
@@ -2678,6 +2689,7 @@ pub(super) async fn extract_with_ocr_for_page(
                     source_dpi,
                     whole_page_raster,
                     prefer_single_block,
+                    layout_detections.is_some(),
                 );
                 #[cfg(feature = "pdf")]
                 let (upright_data, upright_width, upright_height, correction_degrees) = upright_raster_for_backend(
@@ -4809,6 +4821,12 @@ pub(super) fn retain_ocr_formulas_for_accepted_pages(
 /// is: only Tesseract's `config_to_tesseract` reads it, so another backend's config is not
 /// cloned just to carry a hint nothing on that route consumes.
 ///
+/// Layout assembly keeps automatic page segmentation even for a known scan. Its region
+/// geometry already supplies the structure that whole-image sparse-text mode tries to infer,
+/// and forcing that mode can flatten the layout result back to the baseline OCR ordering.
+/// The scan and source-DPI hints remain intact so preprocessing and recognition density do not
+/// regress. ~keep
+///
 /// A no-op when there is nothing to say (`page_rotation_degrees == 0`, no known DPI, and either
 /// the page is not a whole-page scan or the backend is not Tesseract) so such pages never pay a
 /// config clone. Backends that don't recognise a key ignore it, per
@@ -4822,13 +4840,15 @@ pub(super) fn ocr_config_with_page_rotation_hint(
     source_dpi: Option<f64>,
     whole_page_raster: bool,
     prefer_single_block: bool,
+    layout_assembly: bool,
 ) -> Cow<'_, crate::core::config::ocr::OcrConfig> {
     let source_dpi = source_dpi.and_then(serde_json::Number::from_f64);
     let is_tesseract = config.backend == "tesseract";
     let is_tesseract_scan = whole_page_raster && is_tesseract;
     let apply_single_block_psm =
         prefer_single_block && is_tesseract && config.tesseract_config.as_ref().and_then(|c| c.psm).is_none();
-    let apply_whole_image_psm = is_tesseract_scan && config.tesseract_config.as_ref().and_then(|c| c.psm).is_none();
+    let apply_whole_image_psm =
+        is_tesseract_scan && !layout_assembly && config.tesseract_config.as_ref().and_then(|c| c.psm).is_none();
     if page_rotation_degrees == 0 && source_dpi.is_none() && !is_tesseract_scan && !apply_single_block_psm {
         return Cow::Borrowed(config);
     }

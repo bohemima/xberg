@@ -890,7 +890,8 @@ pub(super) async fn recover_page_text_from_image_xobjects(
         return Ok(None);
     }
     let whole_page_raster = crate::pdf::scan_detect::full_page_raster_density(render_doc, page_idx).is_some();
-    let ocr_config = super::pipeline::ocr_config_with_page_rotation_hint(ocr_config, 0, None, whole_page_raster, false);
+    let ocr_config =
+        super::pipeline::ocr_config_with_page_rotation_hint(ocr_config, 0, None, whole_page_raster, false, false);
     recover_image_xobjects(backend, &fallback_images, page_idx, total_pages, &ocr_config, budget)
         .await
         .map(Some)

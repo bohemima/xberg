@@ -7880,7 +7880,7 @@ Name: ___
         const RENDER_DPI: f64 = 150.0;
         let config = crate::core::config::ocr::OcrConfig::default();
 
-        let hinted = ocr_config_with_page_rotation_hint(&config, 0, Some(RENDER_DPI), false, false);
+        let hinted = ocr_config_with_page_rotation_hint(&config, 0, Some(RENDER_DPI), false, false, false);
 
         let options = hinted
             .backend_options
@@ -7908,7 +7908,7 @@ Name: ___
         const REDUCED_RENDER_DPI: f64 = 96.0;
         let config = crate::core::config::ocr::OcrConfig::default();
 
-        let hinted = ocr_config_with_page_rotation_hint(&config, 270, Some(REDUCED_RENDER_DPI), false, false);
+        let hinted = ocr_config_with_page_rotation_hint(&config, 270, Some(REDUCED_RENDER_DPI), false, false, false);
 
         let options = hinted.backend_options.as_ref().expect("both hints must be carried");
         assert_eq!(
@@ -7933,7 +7933,7 @@ Name: ___
     fn should_borrow_config_when_no_page_hint_applies() {
         let config = crate::core::config::ocr::OcrConfig::default();
 
-        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, false, false);
+        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, false, false, false);
 
         assert!(matches!(hinted, Cow::Borrowed(_)), "no hints must mean no config clone");
     }
@@ -7946,7 +7946,7 @@ Name: ___
     fn should_apply_the_whole_image_psm_to_a_scan_page_when_the_caller_set_none() {
         let config = crate::core::config::ocr::OcrConfig::default();
 
-        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true, false);
+        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true, false, false);
 
         let psm = hinted.tesseract_config.as_ref().and_then(|c| c.psm);
         assert_eq!(
@@ -7964,7 +7964,7 @@ Name: ___
     #[test]
     fn should_apply_block_psm_only_for_an_unmapped_text_page_without_an_explicit_psm() {
         let config = crate::core::config::ocr::OcrConfig::default();
-        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true, true);
+        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true, true, false);
         assert_eq!(hinted.tesseract_config.as_ref().and_then(|c| c.psm), Some(6));
 
         let explicit = crate::core::config::ocr::OcrConfig {
@@ -7974,14 +7974,14 @@ Name: ___
             }),
             ..Default::default()
         };
-        let hinted = ocr_config_with_page_rotation_hint(&explicit, 0, None, true, true);
+        let hinted = ocr_config_with_page_rotation_hint(&explicit, 0, None, true, true, false);
         assert_eq!(hinted.tesseract_config.as_ref().and_then(|c| c.psm), Some(4));
 
         let other_backend = crate::core::config::ocr::OcrConfig {
             backend: "paddleocr".to_string(),
             ..Default::default()
         };
-        let hinted = ocr_config_with_page_rotation_hint(&other_backend, 0, None, false, true);
+        let hinted = ocr_config_with_page_rotation_hint(&other_backend, 0, None, false, true, false);
         assert!(hinted.tesseract_config.is_none());
     }
 
@@ -8071,7 +8071,7 @@ Name: ___
     fn should_stamp_known_full_page_scan_hint_for_a_tesseract_scan_page() {
         let config = crate::core::config::ocr::OcrConfig::default();
 
-        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true, false);
+        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true, false, false);
 
         assert_eq!(
             hinted
@@ -8084,6 +8084,32 @@ Name: ___
         );
     }
 
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn should_keep_scan_hint_but_not_force_whole_image_psm_during_layout_assembly() {
+        let config = crate::core::config::ocr::OcrConfig::default();
+
+        let hinted = ocr_config_with_page_rotation_hint(&config, 0, Some(288.0), true, false, true);
+
+        assert_eq!(hinted.tesseract_config.as_ref().and_then(|config| config.psm), None);
+        assert_eq!(
+            hinted
+                .backend_options
+                .as_ref()
+                .and_then(|options| options.get("known_full_page_scan"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            hinted
+                .backend_options
+                .as_ref()
+                .and_then(|options| options.get("source_dpi"))
+                .and_then(serde_json::Value::as_f64),
+            Some(288.0)
+        );
+    }
+
     /// A page that is not a whole-page scan must not carry the hint at all: an absent key, not a
     /// `false` one, is `config_to_tesseract`'s definition of "unknown" (see
     /// `known_full_page_scan_from_backend_options`).
@@ -8092,7 +8118,7 @@ Name: ___
     fn should_not_stamp_known_full_page_scan_hint_for_a_non_scan_page() {
         let config = crate::core::config::ocr::OcrConfig::default();
 
-        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, false, false);
+        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, false, false, false);
 
         assert!(
             hinted
@@ -8156,7 +8182,7 @@ Name: ___
             }),
             ..Default::default()
         };
-        let hinted = ocr_config_with_page_rotation_hint(&explicit, 0, None, true, false);
+        let hinted = ocr_config_with_page_rotation_hint(&explicit, 0, None, true, false, false);
         assert_eq!(hinted.tesseract_config.as_ref().and_then(|c| c.psm), Some(6));
         assert_eq!(
             hinted
@@ -8169,7 +8195,7 @@ Name: ___
         );
 
         let config = crate::core::config::ocr::OcrConfig::default();
-        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, false, false);
+        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, false, false, false);
         assert!(
             hinted.tesseract_config.is_none(),
             "a page that is not a scan keeps the engine default"
@@ -8186,7 +8212,7 @@ Name: ___
             ..Default::default()
         };
 
-        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true, false);
+        let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true, false, false);
 
         assert!(hinted.tesseract_config.is_none());
         assert!(matches!(hinted, Cow::Borrowed(_)));
