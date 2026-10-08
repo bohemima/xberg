@@ -150,10 +150,19 @@ for required_step in \
   'Install system dependencies' \
   'Setup Rust' \
   'Setup ONNX Runtime' \
-  'Fetch test_documents fixtures'; do
+  'Fetch test_documents fixtures' \
+  'Authenticate to Google Cloud' \
+  'Set up Cloud SDK' \
+  'Restore reference corpus cache'; do
   require_step "$validate_harness_job" "- name: ${required_step}$" \
     "standalone harness validation is missing required step: ${required_step}"
 done
+require_step "$validate_harness_job" '^[[:space:]]+- name: Install zstd \(corpus cache decompression\)$' \
+  "standalone harness validation is missing the zstd installation step"
+require_step "$validate_harness_job" '^[[:space:]]+id-token: write$' \
+  "standalone harness validation must authenticate for the reference corpus cache"
+require_step "$validate_harness_job" '^[[:space:]]+run: scripts/benchmarks/restore-corpus-cache\.sh$' \
+  "standalone harness validation must restore ground truth before loading benchmark cohorts"
 if grep -qE '^[[:space:]]+(needs:|continue-on-error:)' <<<"$validate_harness_job"; then
   echo "benchmark workflow validation failed: standalone harness validation must run in parallel and remain required"
   exit 1

@@ -172,6 +172,9 @@ jobs:
     name: Validate benchmark harness
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -197,6 +200,23 @@ jobs:
 
       - name: Fetch test_documents fixtures
         uses: xberg-io/actions/fetch-test-documents@v1
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_BENCHMARK_SA }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Install zstd (corpus cache decompression)
+        run: sudo apt-get install -y zstd
+
+      - name: Restore reference corpus cache
+        env:
+          GCP_BENCHMARK_BUCKET: ${{ secrets.GCP_BENCHMARK_BUCKET }}
+        run: scripts/benchmarks/restore-corpus-cache.sh
 
       # ~keep These deterministic tests validate configuration and artifact contracts; they do
       # ~keep not measure the release binaries built by setup and must not trigger another fat-LTO link.
