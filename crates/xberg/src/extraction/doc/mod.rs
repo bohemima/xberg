@@ -35,38 +35,18 @@ pub(crate) struct DocParagraph {
 /// structure behind it.
 struct MainText {
     content: String,
-    body_content: String,
     paragraphs: Vec<DocParagraph>,
-    subdocuments: Vec<DocSubdocument>,
 }
 
 impl MainText {
     /// A document whose paragraph properties were not read -- Word 6/95, or
-    /// the contiguous fallback. Callers fall back to `body_content`. ~keep
+    /// the contiguous fallback. Callers fall back to `content`.
     fn text_only(content: String) -> Self {
         Self {
-            body_content: content.clone(),
             content,
             paragraphs: Vec::new(),
-            subdocuments: Vec::new(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum DocSubdocumentKind {
-    Footnote,
-    Header,
-    Footer,
-    HeaderFooter,
-    Comment,
-    TextBox,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DocSubdocument {
-    pub kind: DocSubdocumentKind,
-    pub content: String,
 }
 
 /// A paragraph's place in an automatic list.
@@ -84,9 +64,6 @@ pub(crate) struct DocListMembership {
 pub(crate) struct DocExtractionResult {
     /// Extracted text content. Aliased as `text` for back-compat.
     pub content: String,
-    /// Main-document text without appended compatibility sections. ~keep
-    #[serde(default)]
-    pub body_content: String,
     /// Document metadata.
     pub metadata: DocMetadata,
     /// Non-fatal degradations encountered while extracting (see
@@ -94,11 +71,8 @@ pub(crate) struct DocExtractionResult {
     pub processing_warnings: Vec<ProcessingWarning>,
     /// Main-document paragraphs. Empty when the document took a path that
     /// carries no paragraph properties (Word 6/95, or the contiguous
-    /// fallback), in which case callers keep using `body_content`. ~keep
+    /// fallback), in which case callers keep using `content`. ~keep
     pub paragraphs: Vec<DocParagraph>,
-    /// Typed non-body stories kept separate from main-document paragraphs. ~keep
-    #[serde(default)]
-    pub subdocuments: Vec<DocSubdocument>,
 }
 
 /// Metadata extracted from DOC files.
@@ -145,12 +119,10 @@ pub(crate) fn extract_doc_text(content: &[u8]) -> Result<DocExtractionResult> {
             ));
         }
         return extract_text_word6(&word_doc).map(|text| DocExtractionResult {
-            body_content: text.clone(),
             content: text,
             metadata,
             processing_warnings: Vec::new(),
             paragraphs: Vec::new(),
-            subdocuments: Vec::new(),
         });
     }
     let use_1table = (flags_a & 0x0200) != 0;
@@ -163,11 +135,9 @@ pub(crate) fn extract_doc_text(content: &[u8]) -> Result<DocExtractionResult> {
 
     extract_text_word97(&word_doc, &table_stream, &mut processing_warnings).map(|main| DocExtractionResult {
         content: main.content,
-        body_content: main.body_content,
         metadata,
         processing_warnings,
         paragraphs: main.paragraphs,
-        subdocuments: main.subdocuments,
     })
 }
 
@@ -183,8 +153,6 @@ const FIB_LW_IDX_CCP_TEXT: usize = 3;
 /// document and the piece table was never walked -- the whole `Clx` path was
 /// unreachable at runtime and only the contiguous fallback ever ran. ~keep
 const FIB_FC_LCB_IDX_CLX: usize = 33;
-/// Index of the `fcPlcfHdd`/`lcbPlcfHdd` pair in `FibRgFcLcb97`. ~keep
-const FIB_FC_LCB_IDX_PLCF_HDD: usize = 11;
 /// Index of `ccpFtn` (footnote subdocument CP count) in the FIB's `FibRgLw97`
 /// long-word array.
 const FIB_LW_IDX_CCP_FTN: usize = 4;
@@ -740,4 +708,4 @@ mod metadata;
 use metadata::extract_doc_metadata;
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
