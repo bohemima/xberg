@@ -391,6 +391,16 @@ impl TypstExtractor {
                     }
                 }
 
+                if let Some(table_start) = figure_buf.find("#table") {
+                    let function_start = table_start + 1;
+                    let bytes = figure_buf.as_bytes();
+                    if let Some(open) = Self::function_call_open_at(bytes, function_start, b"table")
+                        && let Some(close) = Self::find_matching_typst_parenthesis(bytes, open)
+                    {
+                        Self::emit_table_internal(&figure_buf[function_start..=close], &mut builder);
+                    }
+                }
+
                 let image_path = IMAGE_RE
                     .captures(&figure_buf)
                     .and_then(|c| c.get(1))
@@ -1485,6 +1495,7 @@ Done."#;
 )"#;
         let document = TypstExtractor::build_internal_document(content);
 
+        assert_eq!(document.tables.len(), 1);
         assert_eq!(
             document.tables[0].cells,
             vec![
@@ -1497,6 +1508,37 @@ Done."#;
         let markdown = crate::rendering::render_markdown(&document);
 
         assert_eq!(markdown, "|  |  |\n| --- | --- |\n| Alice | 30 |\n| Bob | 40 |\n");
+    }
+
+    #[test]
+    fn should_preserve_table_wrapped_in_figure() {
+        let content = r#"#figure(
+  align(center)[#table(
+    columns: 3,
+    table.header([Parameter], [Meaning], [Typical]),
+    [`rate`], [Tokens added per second], [`50`],
+    [`burst`], [Maximum tokens], [`100`],
+  )],
+  kind: table,
+)"#;
+        let document = TypstExtractor::build_internal_document(content);
+
+        assert_eq!(
+            document.tables[0].cells,
+            vec![
+                vec!["Parameter".to_string(), "Meaning".to_string(), "Typical".to_string()],
+                vec![
+                    "`rate`".to_string(),
+                    "Tokens added per second".to_string(),
+                    "`50`".to_string()
+                ],
+                vec!["`burst`".to_string(), "Maximum tokens".to_string(), "`100`".to_string()],
+            ]
+        );
+        assert_eq!(
+            crate::rendering::render_markdown(&document),
+            "| Parameter | Meaning | Typical |\n| --- | --- | --- |\n| \\`rate\\` | Tokens added per second | \\`50\\` |\n| \\`burst\\` | Maximum tokens | \\`100\\` |\n"
+        );
     }
 
     #[test]
