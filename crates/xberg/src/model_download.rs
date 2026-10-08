@@ -50,7 +50,7 @@ use sha2::{Digest, Sha256};
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
 ))]
-use std::io::{BufReader, Read};
+use std::io::Read;
 #[cfg(any(
     paddle_ocr,
     layout_detection,
@@ -1833,7 +1833,7 @@ pub(crate) fn parse_sha256_manifest(content: &str) -> Result<Vec<(String, String
 
 /// Verify the SHA256 checksum of a file using streaming reads.
 ///
-/// Streams the file in 64 KiB chunks to avoid loading large model files (100MB+) entirely
+/// ~keep Streams the file in 1 MiB chunks to avoid loading large model files (100MB+) entirely
 /// into memory. Returns `Ok(())` if the checksum matches or is empty (skip verification).
 #[cfg(any(
     paddle_ocr,
@@ -1852,13 +1852,12 @@ pub(crate) fn verify_sha256(path: &Path, expected: &str, label: &str) -> Result<
         return Ok(());
     }
 
-    let file = std::fs::File::open(path).map_err(|e| format!("Failed to open file for checksum: {e}"))?;
-    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut file = std::fs::File::open(path).map_err(|e| format!("Failed to open file for checksum: {e}"))?;
     let mut hasher = Sha256::new();
 
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 1024 * 1024];
     loop {
-        let n = reader
+        let n = file
             .read(&mut buf)
             .map_err(|e| format!("Failed to read file for checksum: {e}"))?;
         if n == 0 {
