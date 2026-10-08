@@ -307,6 +307,13 @@ fn steady_extraction_config(
     max_threads: Option<usize>,
 ) -> Result<xberg::ExtractionConfig> {
     let mut config: xberg::ExtractionConfig = serde_json::from_str(benchmark_config_json(ocr_enabled))?;
+    if let Some(ocr) = config.ocr.as_mut()
+        && ocr.backend == "tesseract"
+    {
+        let tesseract = ocr.tesseract_config.get_or_insert_with(Default::default);
+        tesseract.language.clone_from(&ocr.language);
+        tesseract.use_cache = false;
+    }
     config.output_format = match output_format {
         OutputFormat::Markdown => xberg::OutputFormat::Markdown,
         OutputFormat::Plaintext => xberg::OutputFormat::Plain,
@@ -772,6 +779,13 @@ mod tests {
         assert!(cold.force_ocr);
         assert_eq!(steady.ocr.as_ref().map(|ocr| ocr.backend.as_str()), Some("tesseract"));
         assert_eq!(cold.ocr.as_ref().map(|ocr| ocr.backend.as_str()), Some("tesseract"));
+        let steady_tesseract = steady
+            .ocr
+            .as_ref()
+            .and_then(|ocr| ocr.tesseract_config.as_ref())
+            .expect("warm in-process OCR must carry explicit nested cache control");
+        assert_eq!(steady_tesseract.language, vec!["eng".to_string()]);
+        assert!(!steady_tesseract.use_cache);
         assert_eq!(steady.concurrency.as_ref().and_then(|value| value.max_threads), Some(4));
     }
 

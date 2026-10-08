@@ -457,6 +457,15 @@ pub struct NativeAdapter {
     engine: xberg::engine::Engine,
 }
 
+fn apply_ocr_language(ocr: &mut xberg::OcrConfig, language: &str) {
+    ocr.language = crate::adapter::canonicalize_ocr_languages(language);
+    if ocr.backend == "tesseract" {
+        let tesseract = ocr.tesseract_config.get_or_insert_with(Default::default);
+        tesseract.language.clone_from(&ocr.language);
+        tesseract.use_cache = false;
+    }
+}
+
 impl NativeAdapter {
     /// Create a new native adapter with default configuration
     ///
@@ -479,9 +488,7 @@ impl NativeAdapter {
         let mut config = self.config.clone();
         config.force_ocr |= force_ocr;
         if let Some(language) = ocr_language {
-            // Override only the language, preserving the base backend/pipeline/cache. ~keep
-            config.ocr.get_or_insert_with(Default::default).language =
-                crate::adapter::canonicalize_ocr_languages(language);
+            apply_ocr_language(config.ocr.get_or_insert_with(Default::default), language);
         }
         config
     }
@@ -819,7 +826,7 @@ fn build_batch_input(
         };
         if let Some(language) = ocr_language {
             let mut ocr = base.ocr.clone().unwrap_or_default();
-            ocr.language = crate::adapter::canonicalize_ocr_languages(language);
+            apply_ocr_language(&mut ocr, language);
             file_config.ocr = Some(ocr);
         }
         input.config = Some(file_config);
@@ -830,6 +837,10 @@ fn build_batch_input(
 #[cfg(test)]
 #[path = "native/batch_tests.rs"]
 mod batch_tests;
+
+#[cfg(test)]
+#[path = "native/input_tests.rs"]
+mod input_tests;
 
 #[cfg(test)]
 mod tests {
@@ -901,58 +912,6 @@ mod tests {
         assert_eq!(actual, expected);
         assert!(expected.iter().all(|extension| adapter.supports_format(extension)));
         assert!(!adapter.supports_format("definitely-not-a-format"));
-    }
-
-    fn base_config(force_ocr: bool, backend: Option<&str>) -> ExtractionConfig {
-        let ocr = backend.map(|backend| xberg::OcrConfig {
-            backend: backend.to_string(),
-            language: vec!["eng".to_string()],
-            ..Default::default()
-        });
-        ExtractionConfig {
-            force_ocr,
-            ocr,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn build_batch_input_does_not_disable_base_forced_ocr() {
-        // Base forces OCR; this file passes force_ocr=false but pins a language.
-        // The per-file force_ocr must stay true — never Some(false) over the base.
-        let base = base_config(true, Some("tesseract"));
-        let input = build_batch_input(Path::new("/a.pdf"), false, Some("deu"), &base);
-        let file_config = input.config.expect("file config should be set");
-        assert_eq!(file_config.force_ocr, Some(true));
-    }
-
-    #[test]
-    fn build_batch_input_preserves_backend_and_canonicalizes_language() {
-        // A Paddle base must stay Paddle; only the language changes, split on '+'.
-        let base = base_config(false, Some("paddle"));
-        let input = build_batch_input(Path::new("/a.pdf"), false, Some("deu+eng"), &base);
-        let ocr = input.config.expect("file config").ocr.expect("ocr override");
-        assert_eq!(ocr.backend, "paddle");
-        assert_eq!(ocr.language, vec!["deu".to_string(), "eng".to_string()]);
-    }
-
-    #[test]
-    fn build_batch_input_without_overrides_inherits_base() {
-        // No force flag and no language => no per-file config => inherit the base.
-        let base = base_config(false, Some("paddle"));
-        let input = build_batch_input(Path::new("/a.pdf"), false, None, &base);
-        assert!(input.config.is_none());
-    }
-
-    #[test]
-    fn build_batch_input_force_ocr_without_language_leaves_ocr_inherited() {
-        // Forcing OCR but not pinning a language sets force_ocr but leaves ocr None
-        // so the base OcrConfig (backend/pipeline/cache) is inherited untouched.
-        let base = base_config(false, Some("paddle"));
-        let input = build_batch_input(Path::new("/a.pdf"), true, None, &base);
-        let file_config = input.config.expect("file config");
-        assert_eq!(file_config.force_ocr, Some(true));
-        assert!(file_config.ocr.is_none());
     }
 
     #[tokio::test]
