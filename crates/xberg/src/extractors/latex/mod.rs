@@ -802,6 +802,61 @@ impl LatexExtractor {
         Self::SKIP_COMMANDS.contains(&cmd)
     }
 
+    fn collect_heading_source(
+        first_line: &str,
+        lines: &[&str],
+        start_index: usize,
+        command: &str,
+    ) -> Option<(String, usize)> {
+        let prefix = format!("\\{}", command);
+        let command_start = first_line.find(&prefix)?;
+        let after_start = command_start + prefix.len();
+        let after = &first_line[after_start..];
+        let brace_offset = if after.starts_with('[') {
+            after.find(']')? + 1
+        } else {
+            0
+        };
+        let opening = after_start + brace_offset;
+        if first_line.as_bytes().get(opening) != Some(&b'{') {
+            return None;
+        }
+
+        let mut source = first_line.to_string();
+        let mut depth = 0_u32;
+        for ch in first_line[opening..].chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some((source, start_index));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (line_index, line) in lines.iter().enumerate().skip(start_index + 1) {
+            let trimmed = line.trim();
+            source.push(' ');
+            source.push_str(trimmed);
+            for ch in trimmed.chars() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            return Some((source, line_index));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
     /// Process a single content line (heading, image, math, or paragraph).
     fn process_content_line(
         trimmed: &str,
@@ -837,8 +892,11 @@ impl LatexExtractor {
             let cmd_name = &after_backslash[..cmd_end];
             if let Some(&level) = heading_map.get(cmd_name) {
                 let rest = &after_backslash[cmd_end..].trim_start();
-                if rest.starts_with('{') || rest.starts_with('[') {
-                    if let Some(title) = extract_heading_title(trimmed, cmd_name) {
+                if (rest.starts_with('{') || rest.starts_with('['))
+                    && let Some((heading_source, end_index)) =
+                        Self::collect_heading_source(trimmed, lines, *i, cmd_name)
+                {
+                    if let Some(title) = extract_heading_title(&heading_source, cmd_name) {
                         let (title_text, title_anns) = Self::strip_inline_commands(&title);
                         let idx = b.push_heading(level, &title_text, None, None);
                         if !title_anns.is_empty() {
@@ -853,9 +911,10 @@ impl LatexExtractor {
                                 }
                             }
                         }
-                        if let Some(lbl) = Self::extract_label(trimmed) {
+                        if let Some(lbl) = Self::extract_label(&heading_source) {
                             b.set_anchor(idx, &lbl);
                         }
+                        *i = end_index;
                     }
                     return;
                 }
@@ -1195,6 +1254,32 @@ mod tests {
         let latex = r#"\begin{document}\section{Introduction}\end{document}"#;
         let (content, _, _) = LatexExtractor::extract_from_latex(latex);
         assert!(content.contains("Introduction"));
+    }
+
+    #[test]
+    fn should_preserve_multiline_section_title_and_label() {
+        let latex = r#"\begin{document}
+\section{Cache Layer 4.2 Release
+Notes}\label{cache-layer-4.2-release-notes}
+Body text.
+\end{document}"#;
+        let document = LatexExtractor::build_internal_document(latex, false);
+
+        assert_eq!(document.elements.len(), 2);
+        assert_eq!(
+            document.elements[0].kind,
+            crate::types::internal::ElementKind::Heading { level: 1 }
+        );
+        assert_eq!(document.elements[0].text, "Cache Layer 4.2 Release Notes");
+        assert_eq!(
+            document.elements[0].anchor.as_deref(),
+            Some("cache-layer-4.2-release-notes")
+        );
+        assert_eq!(
+            document.elements[1].kind,
+            crate::types::internal::ElementKind::Paragraph
+        );
+        assert_eq!(document.elements[1].text, "Body text.");
     }
 
     #[test]
