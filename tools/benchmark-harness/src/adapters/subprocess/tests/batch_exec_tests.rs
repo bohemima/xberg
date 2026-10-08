@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::super::SubprocessAdapter;
 use super::super::support::bytes_per_second;
-use super::support::test_batch_capability;
+use super::support::{test_batch_capability, test_xberg_batch_capability};
 
 #[test]
 fn throughput_uses_total_bytes_over_makespan() {
@@ -617,4 +617,125 @@ async fn mixed_ocr_batch_is_rejected_as_non_comparable() {
         .unwrap_err();
 
     assert!(error.to_string().contains("homogeneous OCR cohort"));
+}
+
+#[cfg(unix)]
+fn xberg_batch_adapter(stdout: &str) -> SubprocessAdapter {
+    SubprocessAdapter::with_batch_capability(
+        "xberg-test",
+        "sh",
+        vec![
+            "-c".to_string(),
+            format!("printf '%s' '{}'", stdout.replace('\'', "'\\''")),
+        ],
+        vec![],
+        vec!["pdf".to_string()],
+        test_xberg_batch_capability(true),
+    )
+}
+
+#[cfg(unix)]
+async fn run_xberg_batch_json(stdout: &str, input_count: usize) -> crate::Result<Vec<crate::types::BenchmarkResult>> {
+    let adapter = xberg_batch_adapter(stdout);
+    let inputs: Vec<tempfile::NamedTempFile> = (0..input_count)
+        .map(|_| tempfile::NamedTempFile::new().unwrap())
+        .collect();
+    let paths: Vec<&std::path::Path> = inputs.iter().map(|input| input.path()).collect();
+    adapter
+        .extract_batch(
+            &paths,
+            Duration::from_secs(1),
+            &vec![false; input_count],
+            &vec![None; input_count],
+            OutputFormat::Markdown,
+        )
+        .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn xberg_batch_maps_success_failure_success_by_source_index() {
+    let results = run_xberg_batch_json(
+        r#"{"results":[{"content":"zero","metadata":{"additional":{"source_index":0}}},{"content":"two","metadata":{"additional":{"source_index":2}}}],"total_ms":10,"per_file_ms":[1,null,3],"errors":[{"index":1,"code":1,"error_type":"parsing","source":"one.pdf","message":"broken"}]}"#,
+        3,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].extracted_text.as_deref(), Some("zero"));
+    assert_eq!(results[1].error_kind, ErrorKind::FrameworkError);
+    assert_eq!(results[1].error_message.as_deref(), Some("broken"));
+    assert_eq!(results[2].extracted_text.as_deref(), Some("two"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn xberg_batch_reorders_results_by_source_index() {
+    let results = run_xberg_batch_json(
+        r#"{"results":[{"content":"one","metadata":{"additional":{"source_index":1}}},{"content":"zero","metadata":{"additional":{"source_index":0}}}],"total_ms":10,"per_file_ms":[1,2]}"#,
+        2,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(results[0].extracted_text.as_deref(), Some("zero"));
+    assert_eq!(results[1].extracted_text.as_deref(), Some("one"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn xberg_batch_rejects_multiple_results_without_honest_child_accounting() {
+    let error = run_xberg_batch_json(
+        r#"{"results":[{"content":"page one","metadata":{"additional":{"source_index":0}}},{"content":"page two","metadata":{"additional":{"source_index":0}}},{"content":"other","metadata":{"additional":{"source_index":1}}}],"total_ms":10,"per_file_ms":[4,6]}"#,
+        2,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("multiple results for input index 0"));
+    assert!(
+        error
+            .to_string()
+            .contains("cannot aggregate per-child timing and metadata")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn xberg_batch_rejects_missing_source_index() {
+    let error = run_xberg_batch_json(
+        r#"{"results":[{"content":"zero","metadata":{"additional":{}}}],"total_ms":10,"per_file_ms":[1]}"#,
+        1,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("source_index"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn xberg_batch_rejects_out_of_range_source_index() {
+    let error = run_xberg_batch_json(
+        r#"{"results":[{"content":"zero","metadata":{"additional":{"source_index":7}}}],"total_ms":10,"per_file_ms":[1]}"#,
+        1,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("source_index 7"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn xberg_batch_rejects_mutated_source_index_that_orphans_an_input() {
+    let error = run_xberg_batch_json(
+        r#"{"results":[{"content":"zero","metadata":{"additional":{"source_index":0}}},{"content":"wrong","metadata":{"additional":{"source_index":0}}}],"total_ms":10,"per_file_ms":[1,2]}"#,
+        2,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("no result or error for input index 1"));
 }

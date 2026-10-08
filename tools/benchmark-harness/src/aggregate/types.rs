@@ -1,4 +1,4 @@
-//! Schema types for the aggregated benchmark output (v2.10.0).
+//! Schema types for the aggregated benchmark output (v2.11.0).
 //!
 //! Pure data definitions only — see [`super`] for the aggregation logic that populates them.
 
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Schema version for the aggregated output format.
-pub const SCHEMA_VERSION: &str = "2.10.0";
+pub const SCHEMA_VERSION: &str = "2.11.0";
 
 /// Consolidated results using aggregation format v2.8.0.
 #[derive(Debug, Clone, Serialize, Deserialize)]

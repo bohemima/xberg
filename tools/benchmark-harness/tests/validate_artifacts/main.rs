@@ -345,9 +345,14 @@ fn build_results(
                     .map(|index| IterationResult {
                         // mirror that here so the fixture matches real artifacts.
                         iteration: index + 1,
+                        success: Some(true),
+                        error_kind: Some(ErrorKind::None),
                         duration: Duration::from_millis(1),
                         extraction_duration: None,
+                        subprocess_overhead: None,
                         metrics: zero_metrics(),
+                        batch_sample_id: None,
+                        batch_performance_sample: None,
                     })
                     .collect(),
                 statistics: None,

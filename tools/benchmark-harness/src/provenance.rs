@@ -502,6 +502,9 @@ fn worker_semantics(mode: BenchmarkMode, capability: Option<BatchCapability>) ->
         (BenchmarkMode::Batch, Some(BatchEntryPoint::XbergCliExtractBatch)) => {
             "configured document concurrency cap; Xberg thread budget is recorded separately"
         }
+        (BenchmarkMode::Batch, Some(BatchEntryPoint::XbergRustEngineExtractBatch)) => {
+            "warm in-process Xberg Engine batch; thread budget is recorded separately"
+        }
         (BenchmarkMode::Batch, Some(BatchEntryPoint::DoclingJobkit)) => {
             "docling-jobkit convert_documents in-process; single-process, jobkit multiprocessing disabled"
         }
@@ -521,9 +524,11 @@ fn configured_thread_budget(
     adapter: &dyn FrameworkAdapter,
 ) -> Option<usize> {
     match (mode, capability.map(|value| value.entry_point)) {
-        (BenchmarkMode::SingleFile, _) | (BenchmarkMode::Batch, Some(BatchEntryPoint::XbergCliExtractBatch)) => {
-            adapter.configured_thread_budget()
-        }
+        (BenchmarkMode::SingleFile, _)
+        | (
+            BenchmarkMode::Batch,
+            Some(BatchEntryPoint::XbergCliExtractBatch | BatchEntryPoint::XbergRustEngineExtractBatch),
+        ) => adapter.configured_thread_budget(),
         (BenchmarkMode::Batch, _) => None,
     }
 }
@@ -978,24 +983,8 @@ mod tests {
             None
         );
     }
-
-    #[test]
-    fn old_framework_provenance_deserializes_without_thread_budget() {
-        let provenance: FrameworkProvenance = serde_json::from_value(serde_json::json!({
-            "name": "xberg-markdown-baseline-batch",
-            "version": "1.0.0",
-            "executable": null,
-            "models": [],
-            "batch_capability": null,
-            "requested_workers": 4,
-            "effective_workers": null,
-            "worker_semantics": "legacy",
-            "effective_warmup_iterations": 0,
-            "eligible_documents": 4,
-            "batch_partitions": 1
-        }))
-        .unwrap();
-
-        assert_eq!(provenance.configured_thread_budget, None);
-    }
 }
+
+#[cfg(test)]
+#[path = "provenance_compat_tests.rs"]
+mod provenance_compat_tests;

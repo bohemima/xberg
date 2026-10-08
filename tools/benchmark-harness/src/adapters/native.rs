@@ -8,12 +8,13 @@ use crate::adapters::subprocess::SubprocessAdapter;
 use crate::extract_xberg_file;
 use crate::monitoring::{ResourceMonitor, ResourceStats};
 use crate::types::{
-    BenchmarkResult, ErrorKind, FrameworkCapabilities, OcrStatus, PerformanceMetrics, ResourceMeasurementScope,
-    TimingRegime,
+    BatchCapability, BatchEntryPoint, BatchTimingScope, BenchmarkResult, ErrorKind, FrameworkCapabilities, OcrStatus,
+    PerformanceMetrics, ResourceMeasurementScope, TimingRegime,
 };
 use crate::{Error, Result};
 use async_trait::async_trait;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use xberg::{ExtractedDocument, ExtractionConfig, FormatMetadata};
 
@@ -42,6 +43,8 @@ fn native_capabilities() -> FrameworkCapabilities {
         resource_measurement_scope: ResourceMeasurementScope::HarnessProcessLatencyOnly,
         supported_extensions: native_supported_extensions(),
         ocr_support: true,
+        batch_support: true,
+        batch_capability: Some(native_batch_capability()),
         supported_output_formats: vec![
             crate::types::OutputFormat::Markdown,
             crate::types::OutputFormat::Plaintext,
@@ -49,6 +52,30 @@ fn native_capabilities() -> FrameworkCapabilities {
         version: env!("CARGO_PKG_VERSION").to_string(),
         ..Default::default()
     }
+}
+
+fn native_batch_capability() -> BatchCapability {
+    BatchCapability {
+        entry_point: BatchEntryPoint::XbergRustEngineExtractBatch,
+        timing_scope: BatchTimingScope::WarmSteadyState,
+        per_item_timing: true,
+    }
+}
+
+static NATIVE_BATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn native_batch_sample_id(adapter: &NativeAdapter) -> String {
+    let mut hasher = blake3::Hasher::new();
+    let sequence = NATIVE_BATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let invocation_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    hasher.update(&std::process::id().to_le_bytes());
+    hasher.update(&(std::ptr::from_ref(adapter).addr() as u64).to_le_bytes());
+    hasher.update(&sequence.to_le_bytes());
+    hasher.update(&invocation_time.to_le_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
 /// The per-file facts both single-file rows share, independent of extraction success.
@@ -173,43 +200,110 @@ fn build_batch_inputs(
 
 /// Turn one successful batch envelope into one row per input file.
 ///
-/// xberg returns successful `results` in discovery order and reports failed inputs separately in
-/// `errors`, each tagged with its original request index. Walk inputs in order, emitting a failure
-/// row for errored indices and consuming the next success otherwise, so rows stay aligned to
-/// `file_paths`. ~keep
+/// Xberg returns successful documents in discovery order, each carrying `source_index`, and
+/// reports failed inputs separately by request index. Reject ambiguous or missing outcomes, then
+/// emit exactly one request-ordered row. Multi-document inputs fail closed because their child
+/// timing and metadata cannot be truthfully collapsed into one performance row. ~keep
 fn assemble_batch_rows(
     context: &BatchRowContext<'_>,
     file_paths: &[&Path],
     output: &xberg::ExtractionResult,
     config: &ExtractionConfig,
-) -> Vec<BenchmarkResult> {
-    let extraction_results = &output.results;
-    let error_messages: std::collections::HashMap<usize, String> = output
-        .errors
-        .iter()
-        .map(|item| (item.index, item.message.clone()))
-        .collect();
-    let mut success_cursor = 0usize;
+) -> Result<Vec<BenchmarkResult>> {
+    let mut results_by_input: Vec<Vec<&ExtractedDocument>> = vec![Vec::new(); file_paths.len()];
+    for (position, result) in output.results.iter().enumerate() {
+        let source_index = result
+            .metadata
+            .additional
+            .get("source_index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| {
+                Error::Benchmark(format!(
+                    "native batch result at position {position} is missing a valid metadata.additional.source_index"
+                ))
+            })?;
+        let Some(slot) = results_by_input.get_mut(source_index) else {
+            return Err(Error::Benchmark(format!(
+                "native batch result at position {position} has out-of-range source_index {source_index} for {} inputs",
+                file_paths.len()
+            )));
+        };
+        slot.push(result);
+    }
+
+    let mut errors_by_input = vec![None; file_paths.len()];
+    for error in &output.errors {
+        let Some(slot) = errors_by_input.get_mut(error.index) else {
+            return Err(Error::Benchmark(format!(
+                "native batch error has out-of-range input index {} for {} inputs",
+                error.index,
+                file_paths.len()
+            )));
+        };
+        if slot.replace(error.message.as_str()).is_some() {
+            return Err(Error::Benchmark(format!(
+                "native batch returned multiple errors for input index {}",
+                error.index
+            )));
+        }
+    }
 
     file_paths
         .iter()
         .enumerate()
         .map(|(input_index, file_path)| {
-            if let Some(message) = error_messages.get(&input_index) {
-                return batch_failure_result(context, file_path, message.clone(), ErrorKind::FrameworkError);
-            }
-            let Some(extraction_result) = extraction_results.get(success_cursor) else {
-                return batch_failure_result(
+            let documents = &results_by_input[input_index];
+            match (documents.is_empty(), errors_by_input[input_index]) {
+                (false, Some(_)) => Err(Error::Benchmark(format!(
+                    "native batch returned both results and an error for input index {input_index}"
+                ))),
+                (true, Some(message)) => Ok(batch_failure_result(
                     context,
                     file_path,
-                    "batch output missing a result for this input".to_string(),
+                    message.to_string(),
                     ErrorKind::FrameworkError,
-                );
-            };
-            success_cursor += 1;
-            batch_success_result(context, file_path, extraction_result, config)
+                )),
+                (false, None) if documents.len() == 1 => {
+                    Ok(batch_success_result(context, file_path, documents[0], config))
+                }
+                (false, None) => Err(Error::Benchmark(format!(
+                    "native batch returned multiple results for input index {input_index}; cannot aggregate per-child timing and metadata truthfully"
+                ))),
+                (true, None) => Err(Error::Benchmark(format!(
+                    "native batch returned no result or error for input index {input_index}"
+                ))),
+            }
         })
         .collect()
+}
+
+fn finalize_batch_rows(
+    adapter: &NativeAdapter,
+    mut results: Vec<BenchmarkResult>,
+    total_duration: Duration,
+    resource_stats: &ResourceStats,
+) -> Vec<BenchmarkResult> {
+    let successful_bytes: u64 = results
+        .iter()
+        .filter(|result| result.success)
+        .map(|result| result.file_size)
+        .sum();
+    let batch_throughput = if total_duration.is_zero() {
+        0.0
+    } else {
+        successful_bytes as f64 / total_duration.as_secs_f64()
+    };
+    let throughput_anchor = results.iter().position(|result| result.success);
+    let batch_sample_id = native_batch_sample_id(adapter);
+    for (index, result) in results.iter_mut().enumerate() {
+        result.duration = total_duration;
+        result.subprocess_overhead = Some(Duration::ZERO);
+        result.metrics = metrics_from(resource_stats, batch_throughput);
+        result.framework_capabilities.batch_performance_sample = Some(throughput_anchor == Some(index));
+        result.framework_capabilities.batch_sample_id = Some(batch_sample_id.clone());
+    }
+    results
 }
 
 /// The facts every row of one batch shares.
@@ -360,6 +454,7 @@ pub struct NativeAdapter {
     name: String,
     config: ExtractionConfig,
     cold_adapter: Option<SubprocessAdapter>,
+    engine: xberg::engine::Engine,
 }
 
 impl NativeAdapter {
@@ -375,6 +470,7 @@ impl NativeAdapter {
             name: "xberg-rust-steady-state".to_string(),
             config,
             cold_adapter: None,
+            engine: xberg::engine::Engine::new_default(),
         }
     }
 
@@ -417,6 +513,7 @@ impl NativeAdapter {
             name: "xberg-rust-steady-state".to_string(),
             config,
             cold_adapter: None,
+            engine: xberg::engine::Engine::new_default(),
         }
     }
 
@@ -429,6 +526,16 @@ impl NativeAdapter {
             name,
             config,
             cold_adapter: Some(cold_adapter),
+            engine: xberg::engine::Engine::new_default(),
+        }
+    }
+
+    pub(crate) fn with_identity(name: String, config: ExtractionConfig) -> Self {
+        Self {
+            name,
+            config,
+            cold_adapter: None,
+            engine: xberg::engine::Engine::new_default(),
         }
     }
 
@@ -456,6 +563,10 @@ impl FrameworkAdapter for NativeAdapter {
 
     fn resource_measurement_scope(&self) -> ResourceMeasurementScope {
         ResourceMeasurementScope::HarnessProcessLatencyOnly
+    }
+
+    fn batch_capability(&self) -> Option<BatchCapability> {
+        Some(native_batch_capability())
     }
 
     fn supports_format(&self, file_type: &str) -> bool {
@@ -561,7 +672,9 @@ impl FrameworkAdapter for NativeAdapter {
         if file_paths.is_empty() {
             return Ok(Vec::new());
         }
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        let cancel_token = xberg::cancellation::CancellationToken::new();
+        config.cancel_token = Some(cancel_token.clone());
         let inputs = build_batch_inputs(file_paths, force_ocr, ocr_languages, &config)?;
 
         let total_file_size: u64 = file_paths
@@ -576,14 +689,19 @@ impl FrameworkAdapter for NativeAdapter {
 
         let start = Instant::now();
 
-        let timed_result = tokio::time::timeout(timeout, xberg::extract_batch(inputs, &config)).await;
+        let timed_result = tokio::time::timeout(timeout, self.engine.extract_batch(inputs, &config)).await;
         let timed_out = timed_result.is_err();
         // Keep the whole envelope: output.errors carries per-input failures (with
         // their original index) that must not be dropped, or successful results
-        // would be misattributed to the wrong files when zipped positionally.
+        // would be misattributed to the wrong files when zipped positionally. ~keep
         let batch_result = match timed_result {
             Ok(inner) => inner.map_err(|e| Error::Benchmark(format!("Batch extraction failed: {}", e))),
-            Err(_) => Err(Error::Timeout(format!("Batch extraction exceeded {:?}", timeout))),
+            Err(_) => {
+                cancel_token.cancel();
+                Err(Error::Timeout(format!(
+                    "Batch extraction exceeded {timeout:?}; retained Engine is no longer reusable"
+                )))
+            }
         };
 
         let total_duration = start.elapsed();
@@ -592,6 +710,10 @@ impl FrameworkAdapter for NativeAdapter {
         let snapshots = monitor.get_snapshots().await;
         let baseline = monitor.baseline_memory().await;
         let resource_stats = ResourceMonitor::calculate_stats(&samples, &snapshots, baseline);
+
+        if timed_out {
+            return Err(batch_result.expect_err("timed-out extraction must carry a timeout error"));
+        }
 
         let num_files = file_paths.len() as f64;
         let avg_duration_per_file = Duration::from_secs_f64(total_duration.as_secs_f64() / num_files.max(1.0));
@@ -604,23 +726,19 @@ impl FrameworkAdapter for NativeAdapter {
         };
 
         if let Err(e) = batch_result {
-            let error_kind = if timed_out {
-                ErrorKind::Timeout
-            } else {
-                ErrorKind::HarnessError
-            };
             let message = e.to_string();
             let failure_results: Vec<BenchmarkResult> = file_paths
                 .iter()
-                .map(|file_path| batch_failure_result(&row_context, file_path, message.clone(), error_kind))
+                .map(|file_path| {
+                    batch_failure_result(&row_context, file_path, message.clone(), ErrorKind::HarnessError)
+                })
                 .collect();
             return Ok(failure_results);
         }
 
         let output = batch_result.unwrap();
-        let results = assemble_batch_rows(&row_context, file_paths, &output, &config);
-
-        Ok(results)
+        let results = assemble_batch_rows(&row_context, file_paths, &output, &config)?;
+        Ok(finalize_batch_rows(self, results, total_duration, &resource_stats))
     }
 
     fn version(&self) -> String {
@@ -710,6 +828,10 @@ fn build_batch_input(
 }
 
 #[cfg(test)]
+#[path = "native/batch_tests.rs"]
+mod batch_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
@@ -720,7 +842,7 @@ mod tests {
         let adapter = NativeAdapter::new();
         assert_eq!(adapter.name(), "xberg-rust-steady-state");
         assert_eq!(adapter.timing_regime(), TimingRegime::WarmInProcess);
-        assert_eq!(adapter.batch_capability(), None);
+        assert_eq!(adapter.batch_capability(), Some(native_batch_capability()));
         assert_eq!(
             adapter.supported_output_formats(),
             vec![

@@ -53,6 +53,10 @@ pub(super) struct RecordingBatchAdapter {
     pub(super) batches: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
 }
 
+pub(super) struct FailingWarmupBatchAdapter {
+    pub(super) calls: Arc<AtomicUsize>,
+}
+
 impl RecordingBatchAdapter {
     fn success(file_path: &Path, output_format: OutputFormat) -> BenchmarkResult {
         BenchmarkResult {
@@ -174,21 +178,91 @@ impl FrameworkAdapter for RecordingBatchAdapter {
         _ocr_languages: &[Option<String>],
         output_format: OutputFormat,
     ) -> Result<Vec<BenchmarkResult>> {
-        self.batches.lock().unwrap().push(
+        let mut batches = self.batches.lock().unwrap();
+        batches.push(
             file_paths
                 .iter()
                 .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
                 .collect(),
         );
+        let sample_id = format!("recording-batch-{}", batches.len());
+        drop(batches);
         Ok(file_paths
             .iter()
-            .map(|path| Self::success(path, output_format))
+            .enumerate()
+            .map(|(index, path)| {
+                let mut result = Self::success(path, output_format);
+                result.framework_capabilities.batch_sample_id = Some(sample_id.clone());
+                result.framework_capabilities.batch_performance_sample = Some(index == 0);
+                result
+            })
             .collect())
     }
 
     fn batch_capability(&self) -> Option<BatchCapability> {
         Some(BatchCapability {
             entry_point: crate::types::BatchEntryPoint::XbergCliExtractBatch,
+            timing_scope: BatchTimingScope::WarmSteadyState,
+            per_item_timing: false,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl FrameworkAdapter for FailingWarmupBatchAdapter {
+    fn name(&self) -> &str {
+        "failing-warmup-batch"
+    }
+
+    fn timing_regime(&self) -> crate::types::TimingRegime {
+        crate::types::TimingRegime::WarmInProcess
+    }
+
+    fn supports_format(&self, file_type: &str) -> bool {
+        file_type == "pdf"
+    }
+
+    fn supported_output_formats(&self) -> Vec<OutputFormat> {
+        vec![OutputFormat::Markdown]
+    }
+
+    async fn extract(
+        &self,
+        file_path: &Path,
+        _timeout: Duration,
+        _force_ocr: bool,
+        _ocr_language: Option<&str>,
+        output_format: OutputFormat,
+    ) -> Result<BenchmarkResult> {
+        Ok(RecordingBatchAdapter::success(file_path, output_format))
+    }
+
+    async fn extract_batch(
+        &self,
+        file_paths: &[&Path],
+        _timeout: Duration,
+        _force_ocr: &[bool],
+        _ocr_languages: &[Option<String>],
+        output_format: OutputFormat,
+    ) -> Result<Vec<BenchmarkResult>> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(file_paths
+            .iter()
+            .map(|path| {
+                let mut result = RecordingBatchAdapter::success(path, output_format);
+                if call == 0 {
+                    result.success = false;
+                    result.error_kind = ErrorKind::FrameworkError;
+                    result.error_message = Some("intentional discarded warmup failure".to_string());
+                }
+                result
+            })
+            .collect())
+    }
+
+    fn batch_capability(&self) -> Option<BatchCapability> {
+        Some(BatchCapability {
+            entry_point: crate::types::BatchEntryPoint::XbergRustEngineExtractBatch,
             timing_scope: BatchTimingScope::WarmSteadyState,
             per_item_timing: false,
         })

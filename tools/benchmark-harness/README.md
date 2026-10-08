@@ -262,11 +262,24 @@ framework process, with downloaded artifacts and host filesystem caches left war
 before its measured iterations. These diagnostic rows remain in detailed output but are excluded
 from cross-framework rankings, because the competitor adapters do not yet expose equivalent
 persistent request protocols. `--warmup 0` is rejected for a steady-state adapter.
+In batch mode, explicitly select
+`xberg-{markdown|plaintext}-{baseline|layout}-steady-state-batch`. This lane retains one
+`xberg::Engine`, discards complete warmup batches, then records each measured batch invocation.
+It is diagnostic-only and remains excluded from cross-framework rankings by its
+`warm_in_process` timing regime.
 The steady adapter reports `resource_measurement_scope: harness_process_latency_only`: absolute
 RSS and CPU belong to the long-lived harness rather than an isolated framework process, so their
 raw numeric fields are zeroed as unavailable and excluded from memory/CPU aggregate distributions.
-Latency and throughput remain valid. The separate cold CLI probe is attached to exactly one result
-for that framework, avoiding duplicate cold-start samples.
+Latency and throughput remain valid. In single-file steady-state mode, the separate cold CLI probe
+is attached to exactly one result, avoiding duplicate cold-start samples. The batch lane does not
+construct or report that non-equivalent probe.
+Every requested input still produces exactly one result row. Xberg batch envelopes are joined by
+`metadata.additional.source_index`; indexed failures fill their original slot, while missing,
+conflicting, out-of-range, or multi-result inputs fail the performance run. Multi-result envelopes
+do not expose enough child-level timing and metadata to collapse them honestly. Repeated
+measurements retain their raw invocation metrics and batch sample IDs in `iterations`; summary
+fields remain means for compatibility. Warm batch rows omit `cold_start_duration`: the available
+cold probe is single-file and therefore not a truthful batch cold-start measurement.
 Missing lifecycle or resource-scope metadata deserializes as `unknown`; release validation rejects
 it rather than assuming a cold, isolated-process measurement.
 

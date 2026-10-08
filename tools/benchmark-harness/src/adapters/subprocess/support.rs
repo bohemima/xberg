@@ -139,8 +139,52 @@ pub(super) fn detect_pdf_page_count(path: &std::path::Path) -> Option<u32> {
 #[derive(Debug)]
 pub(super) struct ParsedBatchOutput {
     pub(super) items: Vec<serde_json::Value>,
+    pub(super) errors: Vec<ParsedBatchError>,
     pub(super) reported_total_duration: Option<Duration>,
     pub(super) per_file_durations: Vec<Option<Duration>>,
+}
+
+#[derive(Debug)]
+pub(super) struct ParsedBatchError {
+    pub(super) index: usize,
+    pub(super) message: String,
+}
+
+fn parse_batch_errors(raw: &serde_json::Value) -> Result<Vec<ParsedBatchError>> {
+    let Some(errors) = raw.get("errors") else {
+        return Ok(Vec::new());
+    };
+    let errors = errors
+        .as_array()
+        .ok_or_else(|| Error::Benchmark("batch envelope field 'errors' must be an array".to_string()))?;
+    errors
+        .iter()
+        .enumerate()
+        .map(|(position, error)| {
+            let index = error
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    Error::Benchmark(format!(
+                        "batch envelope errors[{position}] is missing a valid input index"
+                    ))
+                })?;
+            let message = error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .filter(|message| !message.is_empty())
+                .ok_or_else(|| {
+                    Error::Benchmark(format!(
+                        "batch envelope errors[{position}] is missing a non-empty message"
+                    ))
+                })?;
+            Ok(ParsedBatchError {
+                index,
+                message: message.to_string(),
+            })
+        })
+        .collect()
 }
 
 pub(super) fn duration_from_ms(value: &serde_json::Value, field: &str) -> Result<Duration> {
@@ -179,9 +223,11 @@ pub(super) fn parse_batch_output(stdout: &str) -> Result<ParsedBatchOutput> {
                 }
             })
             .collect::<Result<Vec<_>>>()?;
+        let errors = parse_batch_errors(&raw)?;
 
         return Ok(ParsedBatchOutput {
             items,
+            errors,
             reported_total_duration: Some(reported_total_duration),
             per_file_durations,
         });
@@ -207,6 +253,7 @@ pub(super) fn parse_batch_output(stdout: &str) -> Result<ParsedBatchOutput> {
 
     Ok(ParsedBatchOutput {
         items,
+        errors: Vec::new(),
         reported_total_duration: None,
         per_file_durations,
     })

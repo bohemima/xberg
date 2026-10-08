@@ -125,6 +125,7 @@ impl FrameworkAdapter for SubprocessAdapter {
             Some(crate::types::BatchEntryPoint::DoclingJobkit) => (None, None),
             Some(crate::types::BatchEntryPoint::MineruDoParse) => (None, None),
             Some(crate::types::BatchEntryPoint::XbergCliExtractBatch) => (Some(requested), None),
+            Some(crate::types::BatchEntryPoint::XbergRustEngineExtractBatch) => (Some(requested), None),
             Some(crate::types::BatchEntryPoint::LiteparseBatchParse) => (Some(requested), Some(self.batch_workers)),
             None => (Some(requested), Some(requested)),
         }

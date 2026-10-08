@@ -418,6 +418,34 @@ pub(crate) fn successful_performance_samples<'a>(
     samples
 }
 
+/// Expand row-level iteration payloads back into invocation-level measurement rows.
+/// Quality and coverage remain row-scoped; callers use these clones only for performance
+/// distributions so repeated measurements are not collapsed to their stored mean. ~keep
+pub(crate) fn expand_performance_iterations(results: &[&BenchmarkResult]) -> Vec<BenchmarkResult> {
+    let mut expanded = Vec::new();
+    for result in results {
+        if result.iterations.is_empty() {
+            expanded.push((*result).clone());
+            continue;
+        }
+        for iteration in &result.iterations {
+            let mut sample = (*result).clone();
+            sample.success = iteration.success.unwrap_or(sample.success);
+            sample.error_kind = iteration.error_kind.unwrap_or(sample.error_kind);
+            sample.duration = iteration.duration;
+            sample.extraction_duration = iteration.extraction_duration;
+            sample.subprocess_overhead = iteration.subprocess_overhead;
+            sample.metrics = iteration.metrics.clone();
+            sample.framework_capabilities.batch_sample_id = iteration.batch_sample_id.clone();
+            sample.framework_capabilities.batch_performance_sample = iteration.batch_performance_sample;
+            sample.iterations.clear();
+            sample.statistics = None;
+            expanded.push(sample);
+        }
+    }
+    expanded
+}
+
 /// Performance metrics collected during extraction
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
@@ -600,6 +628,7 @@ pub(crate) const fn unknown_resource_measurement_scope() -> ResourceMeasurementS
 #[serde(rename_all = "snake_case")]
 pub enum BatchEntryPoint {
     XbergCliExtractBatch,
+    XbergRustEngineExtractBatch,
     DoclingJobkit,
     LiteparseBatchParse,
     MineruDoParse,
@@ -683,8 +712,16 @@ pub struct PdfMetadata {
 /// Result from a single benchmark iteration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IterationResult {
-    /// Iteration number (0-indexed)
+    /// Iteration number (1-indexed). ~keep
     pub iteration: usize,
+
+    /// Whether this invocation succeeded; absent only in legacy artifacts. ~keep
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
+
+    /// Invocation-level failure class; absent only in legacy artifacts. ~keep
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<ErrorKind>,
 
     /// Total wall-clock duration for this iteration
     pub duration: Duration,
@@ -692,8 +729,20 @@ pub struct IterationResult {
     /// Pure extraction time (if available from subprocess)
     pub extraction_duration: Option<Duration>,
 
+    /// Process overhead for this invocation, when the adapter exposes it. ~keep
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subprocess_overhead: Option<Duration>,
+
     /// Performance metrics for this iteration
     pub metrics: PerformanceMetrics,
+
+    /// Native-batch invocation identity retained before row-level aggregation. ~keep
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_sample_id: Option<String>,
+
+    /// Whether this file row owns the invocation's process-level sample. ~keep
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_performance_sample: Option<bool>,
 }
 
 /// Statistical analysis of durations across multiple iterations

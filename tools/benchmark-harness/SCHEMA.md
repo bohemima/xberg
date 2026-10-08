@@ -1,4 +1,4 @@
-# Aggregation Schema v2.10.0
+# Aggregation Schema v2.11.0
 
 This document describes the structure of `aggregated.json` produced by `benchmark-harness consolidate`.
 
@@ -6,7 +6,7 @@ This document describes the structure of `aggregated.json` produced by `benchmar
 
 ```json
 {
-  "schema_version": "2.10.0",
+  "schema_version": "2.11.0",
   "by_framework_mode": {
     "<aggregate_key>": {
       /* FrameworkModeAggregation */
@@ -95,7 +95,7 @@ suppression and dispersion contract (v2.10.0+):
 ```json
 {
   "successful_sample_count": 42,
-  "performance_sample_count": 40, // process-level samples used for duration/throughput/memory/cpu_seconds (v2.7.0+); a native batch contributes one regardless of document cardinality
+  "performance_sample_count": 40, // invocation-level process samples used for duration/throughput/memory/cpu_seconds; repeated invocations mean this may exceed total_sample_count (v2.11.0+)
   "total_sample_count": 50,
   "framework_errors": 0,
   "harness_errors": 5,
@@ -219,7 +219,7 @@ The batch dedup that collapses a native batch to one `performance_sample_count` 
   "p99_memory_bytes": 189000000, // v2.8.0+
   "extraction_duration_ms": 98.0, // Optional, v2.8.0+
   "subprocess_overhead_ms": 27.4, // Optional, v2.8.0+
-  "cold_start_duration_ms": 210.0, // Optional, v2.8.0+
+  "cold_start_duration_ms": 210.0, // Optional, v2.8.0+; omitted for warm steady-state batch lanes
   "error_message": null, // Optional free-text error, v2.8.0+
   "quality": {
     /* QualityMetrics, including missing_tokens/extra_tokens — Optional, v2.8.0+ */
@@ -234,7 +234,17 @@ The batch dedup that collapses a native batch to one `performance_sample_count` 
     /* SystemLoad — Optional, v2.8.0+ */
   },
   "iterations": [
-    /* IterationResult[] — v2.8.0+, empty unless multiple iterations were run */
+    {
+      "iteration": 1,
+      "success": true,
+      "error_kind": "none",
+      "duration": {"secs": 0, "nanos": 125000000},
+      "extraction_duration": {"secs": 0, "nanos": 98000000},
+      "subprocess_overhead": {"secs": 0, "nanos": 27000000},
+      "metrics": { /* PerformanceMetrics for this invocation */ },
+      "batch_sample_id": "...", // Optional; shared by sibling rows from one native batch
+      "batch_performance_sample": true // Optional; exactly one sibling owns process metrics
+    }
   ],
   "statistics": {
     /* DurationStatistics — Optional, v2.8.0+ */
@@ -243,6 +253,9 @@ The batch dedup that collapses a native batch to one `performance_sample_count` 
 ```
 
 `ocr` is `true` or `false` only when actual OCR usage is known. It is `null` when the framework did not report OCR usage.
+`iterations` contains every measured invocation, including a one-iteration run. Aggregate
+performance percentiles expand these raw samples instead of treating the row-level mean as one
+observation.
 
 The `duration_ms`/`peak_memory_mb`/`f1_*`/`quality_score`/`correct` fields are the original
 v2.3.0 convenience projection and remain unchanged. The v2.8.0 fields above make each row
@@ -339,6 +352,26 @@ aggregate cannot list a format that produced no result for any selected framewor
 maps each logical framework to observed file types absent from its declared capabilities; xberg is
 never listed because it is the full-corpus subject under test. Both fields default empty when older
 v2.9.0 aggregates are deserialized.
+
+## Migration from v2.10.0 to v2.11.0
+
+Additive raw-artifact fields plus a corrected aggregation interpretation; no field was removed or
+renamed.
+
+- Performance distributions expand every retained `iterations` entry instead of treating a
+  document row's mean as one observation. Therefore `performance_sample_count` and each metric's
+  `sample_count` are invocation-scoped and may exceed document-scoped `total_sample_count` when
+  multiple measured iterations were requested. Quality, coverage, and success counts remain
+  document-scoped.
+- Each iteration now carries optional `success`, `error_kind`, `subprocess_overhead`,
+  `batch_sample_id`, and `batch_performance_sample` fields. Their absence preserves legacy row-level
+  behavior when older artifacts are read.
+- Warm steady-state batch rows omit `cold_start_duration`: a single-file CLI probe is not a batch
+  cold-start measurement. Complete warmup batches are discarded, and any failed warmup aborts the
+  run rather than allowing a possibly contaminated retained Engine into measurement.
+- Xberg multi-result batch inputs fail closed. Neither the CLI envelope nor the typed Engine result
+  exposes sufficient per-child accounting to collapse timing and metadata into one honest
+  performance row.
 
 ## Migration from v2.9.0 to v2.10.0
 

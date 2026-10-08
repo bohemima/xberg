@@ -473,10 +473,7 @@ fn register_steady_xberg_adapter(
     pipeline: XbergPipeline,
     pdf_backend: XbergPdfBackend,
 ) -> bool {
-    if !context.has_explicit_frameworks
-        || context.batch_mode
-        || !matches!(pipeline, XbergPipeline::Baseline | XbergPipeline::Layout)
-    {
+    if !context.has_explicit_frameworks || !matches!(pipeline, XbergPipeline::Baseline | XbergPipeline::Layout) {
         return false;
     }
     let format_slug = match context.format {
@@ -488,13 +485,18 @@ fn register_steady_xberg_adapter(
     } else {
         ""
     };
-    let steady_name = format!("xberg-{format_slug}-{}{backend_suffix}-steady-state", pipeline.as_str());
+    let batch_suffix = if context.batch_mode { "-batch" } else { "" };
+    let steady_name = format!(
+        "xberg-{format_slug}-{}{backend_suffix}-steady-state{batch_suffix}",
+        pipeline.as_str()
+    );
     if !(context.should_init)(&steady_name) {
         return false;
     }
     match create_xberg_steady_adapter(
         pipeline,
         context.format,
+        context.batch_mode,
         context.ocr,
         pdf_backend,
         context.config.xberg_max_threads,
@@ -971,29 +973,5 @@ pub(crate) async fn execute(args: RunArgs) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn steady_adapter_is_not_registered_without_explicit_selection() {
-        let config = BenchmarkConfig::default();
-        let should_init = |_name: &str| true;
-        let context = XbergRegistration {
-            config: &config,
-            batch_mode: false,
-            has_explicit_frameworks: false,
-            ocr: false,
-            format: OutputFormat::Markdown,
-            should_init: &should_init,
-        };
-        let mut registry = AdapterRegistry::new();
-
-        assert!(!register_steady_xberg_adapter(
-            &mut registry,
-            &context,
-            XbergPipeline::Layout,
-            XbergPdfBackend::Native,
-        ));
-        assert!(registry.is_empty());
-    }
-}
+#[path = "run_tests.rs"]
+mod tests;

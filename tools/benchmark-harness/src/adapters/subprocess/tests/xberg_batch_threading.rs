@@ -6,7 +6,7 @@ use crate::types::OutputFormat;
 use std::time::Duration;
 
 use super::super::SubprocessAdapter;
-use super::support::test_batch_capability;
+use super::support::test_xberg_batch_capability;
 
 #[cfg(unix)]
 #[tokio::test]
@@ -23,7 +23,7 @@ async fn xberg_batch_passes_distinct_concurrency_and_thread_limits() {
             done
             [ "$concurrent" = "3" ] && [ "$threads" = "7" ] || exit 64
             sleep 0.02
-            printf '{"results":[{"content":"ok"}],"total_ms":0,"per_file_ms":[1]}'
+            printf '{"results":[{"content":"ok","metadata":{"additional":{"source_index":0}}}],"total_ms":0,"per_file_ms":[1]}'
         "#;
     let adapter = SubprocessAdapter::with_batch_capability(
         "xberg-test",
@@ -31,7 +31,7 @@ async fn xberg_batch_passes_distinct_concurrency_and_thread_limits() {
         vec!["-c".to_string(), script.to_string(), "worker-budget-probe".to_string()],
         vec![],
         vec!["pdf".to_string()],
-        test_batch_capability(true),
+        test_xberg_batch_capability(true),
     )
     .with_batch_workers(3)
     .with_xberg_max_threads(7);
@@ -67,7 +67,7 @@ async fn xberg_batch_defaults_thread_limit_to_worker_limit() {
             done
             [ "$concurrent" = "7" ] && [ "$threads" = "7" ] || exit 64
             sleep 0.02
-            printf '{"results":[{"content":"ok"}],"total_ms":0,"per_file_ms":[1]}'
+            printf '{"results":[{"content":"ok","metadata":{"additional":{"source_index":0}}}],"total_ms":0,"per_file_ms":[1]}'
         "#;
     let adapter = SubprocessAdapter::with_batch_capability(
         "xberg-test",
@@ -75,7 +75,7 @@ async fn xberg_batch_defaults_thread_limit_to_worker_limit() {
         vec!["-c".to_string(), script.to_string(), "legacy-budget-probe".to_string()],
         vec![],
         vec!["pdf".to_string()],
-        test_batch_capability(true),
+        test_xberg_batch_capability(true),
     )
     .with_batch_workers(7);
     let file = tempfile::NamedTempFile::new().unwrap();

@@ -1,7 +1,7 @@
 //! Tests for native-batch execution: fixed-batch partitioning against a real cohort,
 //! repeated-iteration sample bookkeeping, and single/batch quality-score parity.
 
-use super::support::{RecordingBatchAdapter, write_ordered_cohort};
+use super::support::{FailingWarmupBatchAdapter, RecordingBatchAdapter, write_ordered_cohort};
 use crate::adapter::FrameworkAdapter;
 use crate::config::{BenchmarkConfig, BenchmarkMode};
 use crate::registry::AdapterRegistry;
@@ -9,6 +9,7 @@ use crate::runner::BenchmarkRunner;
 use crate::runner::execution::BatchIterationTask;
 use crate::types::OutputFormat;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[tokio::test]
 async fn fixed_batches_preserve_manifest_order_across_native_calls() {
@@ -96,7 +97,7 @@ async fn repeated_native_batch_preserves_one_sample_per_document_and_iteration()
         file_paths: vec![first.path().to_path_buf(), second.path().to_path_buf()],
         adapter,
         config: &config,
-        cold_start_duration: None,
+        cold_start_duration: Some(std::time::Duration::from_millis(99)),
         force_ocr_flags: vec![false, false],
         ocr_languages: vec![None, None],
         output_format: OutputFormat::Markdown,
@@ -115,8 +116,77 @@ async fn repeated_native_batch_preserves_one_sample_per_document_and_iteration()
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
-        assert_eq!(result.statistics.unwrap().sample_count, 3);
+        assert_eq!(result.statistics.as_ref().unwrap().sample_count, 3);
+        assert_eq!(
+            result
+                .iterations
+                .iter()
+                .filter_map(|iteration| iteration.batch_sample_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["recording-batch-1", "recording-batch-2", "recording-batch-3"]
+        );
+        assert_eq!(result.framework_capabilities.batch_sample_id, None);
+        assert_eq!(result.cold_start_duration, None);
     }
+}
+
+#[tokio::test]
+async fn failed_discarded_warmup_batch_aborts_before_measurement() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let config = BenchmarkConfig {
+        warmup_iterations: 1,
+        benchmark_iterations: 1,
+        benchmark_mode: BenchmarkMode::Batch,
+        ..Default::default()
+    };
+    let adapter: Arc<dyn FrameworkAdapter> = Arc::new(FailingWarmupBatchAdapter {
+        calls: Arc::clone(&calls),
+    });
+
+    let error = BenchmarkRunner::run_batch_iterations_static(BatchIterationTask {
+        file_paths: vec![file.path().to_path_buf()],
+        adapter,
+        config: &config,
+        cold_start_duration: None,
+        force_ocr_flags: vec![false],
+        ocr_languages: vec![None],
+        output_format: OutputFormat::Markdown,
+    })
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("discarded batch warmup 1 failed"));
+    assert!(error.to_string().contains("intentional discarded warmup failure"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn warm_batch_lane_omits_single_file_cold_start_probe() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = write_ordered_cohort(temp.path(), &["pdf", "pdf", "pdf", "pdf"]);
+    let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut registry = AdapterRegistry::new();
+    registry
+        .register(Arc::new(RecordingBatchAdapter {
+            batches: Arc::clone(&batches),
+        }))
+        .unwrap();
+    let config = BenchmarkConfig {
+        benchmark_mode: BenchmarkMode::Batch,
+        warmup_iterations: 1,
+        benchmark_iterations: 1,
+        ..Default::default()
+    };
+    let mut runner = BenchmarkRunner::new(config, registry);
+    runner.load_cohort(temp.path(), &manifest).unwrap();
+    runner.set_fixed_batch_size(1).unwrap();
+
+    let results = runner.run(&["recording".to_string()]).await.unwrap();
+
+    assert_eq!(batches.lock().unwrap().len(), 8);
+    assert_eq!(results.len(), 4);
+    assert!(results.iter().all(|result| result.cold_start_duration.is_none()));
 }
 
 #[tokio::test]

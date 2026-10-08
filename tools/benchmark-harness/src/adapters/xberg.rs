@@ -260,12 +260,13 @@ pub fn create_xberg_adapter(
 
 /// Creates an in-process Xberg adapter for steady-state latency measurements. ~keep
 ///
-/// Only baseline and layout are exposed initially. The paired subprocess adapter is retained
-/// solely to measure a separate cold CLI start; measured extractions use the same Rust process
-/// as their discarded warmup iteration.
+/// Only baseline and layout are exposed initially. Single-file mode retains a paired subprocess
+/// adapter solely for its cold CLI probe. Batch mode has no truthful equivalent probe and retains
+/// only one Rust [`xberg::Engine`] across discarded warmups and measured invocations. ~keep
 pub fn create_xberg_steady_adapter(
     pipeline: XbergPipeline,
     output_format: OutputFormat,
+    batch: bool,
     ocr_enabled: bool,
     pdf_backend: XbergPdfBackend,
     max_threads: Option<usize>,
@@ -278,15 +279,19 @@ pub fn create_xberg_steady_adapter(
     }
 
     let config = steady_extraction_config(pipeline, output_format, ocr_enabled, pdf_backend, max_threads)?;
+    let name = format!(
+        "{}-steady-state{}",
+        xberg_framework_name(pipeline, output_format, false, pdf_backend),
+        if batch { "-batch" } else { "" }
+    );
+    if batch {
+        return Ok(NativeAdapter::with_identity(name, config));
+    }
     let cold_adapter = match max_threads {
         Some(max_threads) => create_xberg_adapter(pipeline, output_format, false, ocr_enabled, pdf_backend)?
             .with_xberg_max_threads(max_threads),
         None => create_xberg_adapter(pipeline, output_format, false, ocr_enabled, pdf_backend)?,
     };
-    let name = format!(
-        "{}-steady-state",
-        xberg_framework_name(pipeline, output_format, false, pdf_backend)
-    );
     Ok(NativeAdapter::with_identity_and_cold_adapter(
         name,
         config,
@@ -445,6 +450,7 @@ fn validate_xberg_cli_override(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::FrameworkAdapter;
 
     fn merged_benchmark_config(tesseract_ocr_enabled: bool) -> xberg::ExtractionConfig {
         xberg::core::config::merge::merge_config_json(
@@ -723,6 +729,7 @@ mod tests {
         let error = match create_xberg_steady_adapter(
             XbergPipeline::SceptreOrt,
             OutputFormat::Markdown,
+            false,
             true,
             XbergPdfBackend::Native,
             None,
@@ -731,6 +738,22 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("does not yet support"));
+    }
+
+    #[test]
+    fn warm_batch_adapter_has_no_misleading_single_file_cold_probe() {
+        let adapter = create_xberg_steady_adapter(
+            XbergPipeline::Baseline,
+            OutputFormat::Markdown,
+            true,
+            false,
+            XbergPdfBackend::Native,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(adapter.name(), "xberg-markdown-baseline-steady-state-batch");
+        assert!(!adapter.has_separate_cold_probe());
     }
 
     #[test]

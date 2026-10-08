@@ -1,8 +1,8 @@
-//! Aggregation module for benchmark results (v2.10.0 output schema).
+//! Aggregation module for benchmark results (v2.11.0 output schema).
 //!
 //! Groups [`BenchmarkResult`] records by framework-and-mode, output format, file type, and
 //! OCR usage (yes/no), then computes percentile-based statistics for each
-//! group. The output schema (`schema_version: "2.10.0"`) surfaces TF1 and SF1 separately
+//! group. The output schema (`schema_version: "2.11.0"`) surfaces TF1 and SF1 separately
 //! with per-fixture rows preserved and split rankings by output format, plus a cohort-wide
 //! [`FailureSummary`] rolling up framework-fault vs infrastructure failures (v2.9.0+).
 //!

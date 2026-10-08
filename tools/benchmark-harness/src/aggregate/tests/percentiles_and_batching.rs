@@ -48,6 +48,79 @@ fn test_calculate_percentiles() {
     assert_eq!(percentiles.memory.p99, None);
 }
 
+#[test]
+fn performance_percentiles_use_raw_iteration_samples() {
+    let mut result = create_test_result("xberg", "pdf", OcrStatus::NotUsed, 20, 2_000_000.0, 20_000_000);
+    result.iterations = [(1, 10, 1_000_000.0, 10_000_000), (2, 30, 3_000_000.0, 30_000_000)]
+        .into_iter()
+        .map(
+            |(iteration, duration_ms, throughput, memory)| crate::types::IterationResult {
+                iteration,
+                success: Some(true),
+                error_kind: Some(ErrorKind::None),
+                duration: Duration::from_millis(duration_ms),
+                extraction_duration: Some(Duration::from_millis(duration_ms - 1)),
+                subprocess_overhead: Some(Duration::from_millis(1)),
+                metrics: PerformanceMetrics {
+                    peak_memory_bytes: memory,
+                    peak_memory_delta_bytes: memory,
+                    throughput_bytes_per_sec: throughput,
+                    ..Default::default()
+                },
+                batch_sample_id: None,
+                batch_performance_sample: None,
+            },
+        )
+        .collect();
+
+    let percentiles = calculate_percentiles(&[&result]);
+
+    assert_eq!(percentiles.performance_sample_count, 2);
+    assert_eq!(percentiles.duration.sample_count, 2);
+    assert_eq!(percentiles.duration.p50, 20.0);
+    assert_eq!(percentiles.throughput.p50, 2.0);
+    assert_eq!(percentiles.memory.p50, 20.0);
+    assert_eq!(
+        percentiles.extraction_duration.as_ref().map(|values| values.p50),
+        Some(19.0)
+    );
+}
+
+#[test]
+fn raw_successful_invocation_survives_a_later_failed_iteration() {
+    let mut result = create_test_result("xberg", "pdf", OcrStatus::NotUsed, 20, 2_000_000.0, 20_000_000);
+    result.success = false;
+    result.error_kind = ErrorKind::FrameworkError;
+    result.iterations = [
+        (1, true, ErrorKind::None, 10),
+        (2, false, ErrorKind::FrameworkError, 30),
+    ]
+    .into_iter()
+    .map(
+        |(iteration, success, error_kind, duration_ms)| crate::types::IterationResult {
+            iteration,
+            success: Some(success),
+            error_kind: Some(error_kind),
+            duration: Duration::from_millis(duration_ms),
+            extraction_duration: Some(Duration::from_millis(duration_ms)),
+            subprocess_overhead: None,
+            metrics: PerformanceMetrics {
+                throughput_bytes_per_sec: 1_000_000.0,
+                ..Default::default()
+            },
+            batch_sample_id: None,
+            batch_performance_sample: None,
+        },
+    )
+    .collect();
+
+    let percentiles = calculate_percentiles(&[&result]);
+
+    assert_eq!(percentiles.successful_sample_count, 0);
+    assert_eq!(percentiles.performance_sample_count, 1);
+    assert_eq!(percentiles.duration.p50, 10.0);
+}
+
 /// Defect S1 boundary regression: `p95` must flip from suppressed to reported at exactly
 /// `MIN_SAMPLES_FOR_P95` samples, and `p99` at exactly `MIN_SAMPLES_FOR_P99`. This pins down
 /// the exact threshold rather than only exercising values comfortably above or below it.

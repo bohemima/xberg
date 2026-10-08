@@ -20,6 +20,81 @@ use super::support::{
     parse_batch_output, validate_batch_item,
 };
 
+fn xberg_source_index(item: &serde_json::Value, position: usize) -> Result<usize> {
+    item.get("metadata")
+        .and_then(|metadata| metadata.get("additional"))
+        .and_then(|additional| additional.get("source_index"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            Error::Benchmark(format!(
+                "Xberg batch result at position {position} is missing a valid metadata.additional.source_index"
+            ))
+        })
+}
+
+/// Align Xberg's discovery-ordered results and separately indexed errors to request order.
+/// Every input must have exactly one outcome. Multi-document results fail closed because the CLI
+/// envelope has no per-child timings from which to build one honest performance row. ~keep
+fn align_xberg_batch_output(parsed: &mut ParsedBatchOutput, input_count: usize) -> Result<()> {
+    let mut results_by_input: Vec<Vec<serde_json::Value>> = vec![Vec::new(); input_count];
+    for (position, item) in parsed.items.drain(..).enumerate() {
+        let source_index = xberg_source_index(&item, position)?;
+        let Some(slot) = results_by_input.get_mut(source_index) else {
+            return Err(Error::Benchmark(format!(
+                "Xberg batch result at position {position} has out-of-range source_index {source_index} for {input_count} inputs"
+            )));
+        };
+        slot.push(item);
+    }
+
+    let mut errors_by_input = vec![None; input_count];
+    for error in parsed.errors.drain(..) {
+        let Some(slot) = errors_by_input.get_mut(error.index) else {
+            return Err(Error::Benchmark(format!(
+                "Xberg batch error has out-of-range input index {} for {input_count} inputs",
+                error.index
+            )));
+        };
+        if slot.replace(error.message).is_some() {
+            return Err(Error::Benchmark(format!(
+                "Xberg batch returned multiple errors for input index {}",
+                error.index
+            )));
+        }
+    }
+
+    for input_index in 0..input_count {
+        if results_by_input[input_index].is_empty() && errors_by_input[input_index].is_none() {
+            return Err(Error::Benchmark(format!(
+                "Xberg batch returned no result or error for input index {input_index}"
+            )));
+        }
+        if !results_by_input[input_index].is_empty() && errors_by_input[input_index].is_some() {
+            return Err(Error::Benchmark(format!(
+                "Xberg batch returned both results and an error for input index {input_index}"
+            )));
+        }
+    }
+
+    let mut aligned = Vec::with_capacity(input_count);
+    for input_index in 0..input_count {
+        if let Some(message) = errors_by_input[input_index].take() {
+            aligned.push(serde_json::json!({ "error": message }));
+            continue;
+        }
+        let documents = &mut results_by_input[input_index];
+        if documents.len() != 1 {
+            return Err(Error::Benchmark(format!(
+                "Xberg batch returned multiple results for input index {input_index}; the envelope cannot aggregate per-child timing and metadata truthfully"
+            )));
+        }
+        aligned.push(documents.pop().expect("cardinality checked above"));
+    }
+    parsed.items = aligned;
+    Ok(())
+}
+
 /// The subprocess-level outcome of a native-batch invocation, plus the request-scoped
 /// values needed to turn it into per-file `BenchmarkResult`s. Grouped to keep
 /// `build_batch_results_from_parsed_output`'s signature under the crate's parameter-count
@@ -633,7 +708,7 @@ impl SubprocessAdapter {
         outcome: BatchOutcome,
     ) -> Result<Vec<BenchmarkResult>> {
         let BatchOutcome {
-            parsed_batch,
+            mut parsed_batch,
             duration,
             resource_stats,
             error,
@@ -643,6 +718,9 @@ impl SubprocessAdapter {
             output_format,
         } = outcome;
 
+        if batch_capability.entry_point == BatchEntryPoint::XbergCliExtractBatch {
+            align_xberg_batch_output(&mut parsed_batch, file_paths.len())?;
+        }
         Self::validate_parsed_batch_cardinality(file_paths, &parsed_batch)?;
         let mut batch_validations: Vec<(bool, Option<String>, ErrorKind)> =
             parsed_batch.items.iter().map(validate_batch_item).collect();

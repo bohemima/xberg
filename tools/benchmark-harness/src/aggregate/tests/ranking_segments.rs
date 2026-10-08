@@ -372,9 +372,14 @@ fn per_fixture_row_carries_every_measured_field_losslessly() {
     });
     result.iterations = vec![crate::types::IterationResult {
         iteration: 0,
+        success: Some(true),
+        error_kind: Some(crate::types::ErrorKind::None),
         duration: std::time::Duration::from_millis(10),
         extraction_duration: None,
+        subprocess_overhead: None,
         metrics: result.metrics.clone(),
+        batch_sample_id: None,
+        batch_performance_sample: None,
     }];
     result.statistics = Some(crate::types::DurationStatistics {
         mean: std::time::Duration::from_millis(100),

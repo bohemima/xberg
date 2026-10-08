@@ -6,7 +6,7 @@
 use crate::adapter::FrameworkAdapter;
 use crate::config::BenchmarkConfig;
 use crate::system_load::SystemLoad;
-use crate::types::{BatchCapability, BenchmarkResult, ErrorKind, IterationResult, OutputFormat};
+use crate::types::{BatchCapability, BatchTimingScope, BenchmarkResult, ErrorKind, IterationResult, OutputFormat};
 use crate::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -271,19 +271,8 @@ async fn run_measured_iterations(
 
 fn build_single_benchmark_result(
     all_results: Vec<BenchmarkResult>,
-    config: &BenchmarkConfig,
     cold_start_duration: Option<Duration>,
 ) -> Result<BenchmarkResult> {
-    if config.benchmark_iterations == 1 && !all_results.is_empty() {
-        let mut result = all_results
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::Benchmark("Failed to retrieve single iteration result".to_string()))?;
-        result.cold_start_duration = cold_start_duration;
-        result.system_load = Some(SystemLoad::capture());
-        return Ok(result);
-    }
-
     if all_results.is_empty() {
         return Err(Error::Benchmark("No successful iterations".to_string()));
     }
@@ -293,9 +282,14 @@ fn build_single_benchmark_result(
         .enumerate()
         .map(|(idx, result)| IterationResult {
             iteration: idx + 1,
+            success: Some(result.success),
+            error_kind: Some(result.error_kind),
             duration: result.duration,
             extraction_duration: result.extraction_duration,
+            subprocess_overhead: result.subprocess_overhead,
             metrics: result.metrics.clone(),
+            batch_sample_id: result.framework_capabilities.batch_sample_id.clone(),
+            batch_performance_sample: result.framework_capabilities.batch_performance_sample,
         })
         .collect();
 
@@ -430,6 +424,20 @@ async fn run_batch_extraction_iterations(
         // Retain them so aggregation and the minimum-success gate evaluate the full cohort.
         let has_timeout = batch_results.iter().any(|r| r.error_kind == ErrorKind::Timeout);
 
+        if iteration < warmup_iterations
+            && let Some(failure) = batch_results.iter().find(|result| !result.success)
+        {
+            return Err(Error::Benchmark(format!(
+                "discarded batch warmup {} failed for '{}': {}",
+                iteration + 1,
+                adapter.name(),
+                failure
+                    .error_message
+                    .as_deref()
+                    .unwrap_or("framework returned an unsuccessful warmup row")
+            )));
+        }
+
         if iteration >= warmup_iterations || has_timeout {
             all_batch_results.push(batch_results);
         }
@@ -457,9 +465,14 @@ fn build_one_batch_file_result(
         .enumerate()
         .map(|(idx, result)| IterationResult {
             iteration: idx + 1,
+            success: Some(result.success),
+            error_kind: Some(result.error_kind),
             duration: result.duration,
             extraction_duration: result.extraction_duration,
+            subprocess_overhead: result.subprocess_overhead,
             metrics: result.metrics.clone(),
+            batch_sample_id: result.framework_capabilities.batch_sample_id.clone(),
+            batch_performance_sample: result.framework_capabilities.batch_performance_sample,
         })
         .collect();
 
@@ -478,19 +491,10 @@ fn build_one_batch_file_result(
         .copied()
         .find(|result| result.success)
         .unwrap_or(first_result);
-    let all_success = file_iterations.iter().all(|result| result.success);
-    let error_message = file_iterations
-        .iter()
-        .find(|result| !result.success)
-        .and_then(|result| result.error_message.clone());
-
-    let error_kind = dominant_error_kind(
-        all_success,
-        file_iterations
-            .iter()
-            .filter(|result| !result.success)
-            .map(|result| result.error_kind),
-    );
+    let (all_success, error_message, error_kind) = summarize_batch_outcomes(&file_iterations);
+    let mut framework_capabilities = first_result.framework_capabilities.clone();
+    framework_capabilities.batch_sample_id = None;
+    framework_capabilities.batch_performance_sample = None;
 
     BenchmarkResult {
         framework: first_result.framework.clone(),
@@ -509,7 +513,7 @@ fn build_one_batch_file_result(
         statistics: Some(statistics),
         cold_start_duration,
         file_extension: first_result.file_extension.clone(),
-        framework_capabilities: first_result.framework_capabilities.clone(),
+        framework_capabilities,
         pdf_metadata: representative_result.pdf_metadata.clone(),
         ocr_status: representative_result.ocr_status,
         extracted_text: representative_result.extracted_text.clone(),
@@ -517,25 +521,27 @@ fn build_one_batch_file_result(
     }
 }
 
+fn summarize_batch_outcomes(file_iterations: &[&BenchmarkResult]) -> (bool, Option<String>, ErrorKind) {
+    let all_success = file_iterations.iter().all(|result| result.success);
+    let error_message = file_iterations
+        .iter()
+        .find(|result| !result.success)
+        .and_then(|result| result.error_message.clone());
+    let error_kind = dominant_error_kind(
+        all_success,
+        file_iterations
+            .iter()
+            .filter(|result| !result.success)
+            .map(|result| result.error_kind),
+    );
+    (all_success, error_message, error_kind)
+}
+
 fn build_batch_benchmark_results(
     all_batch_results: Vec<Vec<BenchmarkResult>>,
     file_paths: &[PathBuf],
-    config: &BenchmarkConfig,
     cold_start_duration: Option<Duration>,
 ) -> Result<Vec<BenchmarkResult>> {
-    if config.benchmark_iterations == 1 && !all_batch_results.is_empty() {
-        let mut result = all_batch_results
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::Benchmark("Failed to retrieve single batch iteration result".to_string()))?;
-        let system_load = Some(SystemLoad::capture());
-        for r in &mut result {
-            r.cold_start_duration = cold_start_duration;
-            r.system_load = system_load;
-        }
-        return Ok(result);
-    }
-
     if all_batch_results.is_empty() {
         return Err(Error::Benchmark("No batch results".to_string()));
     }
@@ -609,7 +615,7 @@ impl BenchmarkRunner {
         #[cfg(feature = "profiling")]
         finish_profiling(profiler, &adapter, config, file_path);
 
-        build_single_benchmark_result(all_results, config, cold_start_duration)
+        build_single_benchmark_result(all_results, cold_start_duration)
     }
 
     /// Run multiple iterations of batch extraction (static method for async spawning)
@@ -640,6 +646,11 @@ impl BenchmarkRunner {
 
         let all_batch_results = run_batch_extraction_iterations(&extraction_context, batch_capability).await?;
 
-        build_batch_benchmark_results(all_batch_results, &file_paths, config, cold_start_duration)
+        let cold_start_duration = match batch_capability.timing_scope {
+            BatchTimingScope::WarmSteadyState => None,
+            BatchTimingScope::ColdEndToEndSubprocess => cold_start_duration,
+        };
+
+        build_batch_benchmark_results(all_batch_results, &file_paths, cold_start_duration)
     }
 }

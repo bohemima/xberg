@@ -8,7 +8,7 @@ use super::types::{
     QualityPercentiles, SystemLoadPercentiles,
 };
 use crate::stats::{percentile_r7, sanitize_f64};
-use crate::types::{BenchmarkResult, ErrorKind, successful_performance_samples};
+use crate::types::{BenchmarkResult, ErrorKind, expand_performance_iterations, successful_performance_samples};
 use std::collections::HashMap;
 
 /// Build a `Percentiles` group from a slice of values (need not be pre-sorted).
@@ -308,9 +308,13 @@ fn build_quality_percentiles(successful: &[&BenchmarkResult]) -> Option<QualityP
 pub(super) fn calculate_percentiles(results: &[&BenchmarkResult]) -> PerformancePercentiles {
     let successful: Vec<&BenchmarkResult> = results.iter().filter(|r| r.success).copied().collect();
     let framework_fault_failures = results.iter().filter(|r| is_framework_fault_failure(r)).count();
-    let performance_samples = successful_performance_samples(results.iter().copied());
+    let expanded_results = expand_performance_iterations(results);
+    let expanded_refs: Vec<&BenchmarkResult> = expanded_results.iter().collect();
+    let expanded_successful: Vec<&BenchmarkResult> =
+        expanded_refs.iter().filter(|result| result.success).copied().collect();
+    let performance_samples = successful_performance_samples(expanded_refs.iter().copied());
 
-    let performance_metrics = build_performance_metrics(results, &successful, &performance_samples);
+    let performance_metrics = build_performance_metrics(&expanded_refs, &expanded_successful, &performance_samples);
 
     // Real per-invocation batch size, derived from actual batch membership
     // (`framework_capabilities.batch_sample_id`) rather than the coarse
@@ -319,7 +323,7 @@ pub(super) fn calculate_percentiles(results: &[&BenchmarkResult]) -> Performance
     // excluded from timing eligibility (see `is_timing_eligible`) for a reason unrelated to batch
     // grouping — e.g. 10 single-file results with only 5 timing-eligible would report a
     // fictitious batch_size of 2. (Defect S3) ~keep
-    let batch_size = compute_batch_size(results, &performance_samples);
+    let batch_size = compute_batch_size(&expanded_refs, &performance_samples);
 
     let system_load = aggregate_system_load(results);
 

@@ -68,6 +68,13 @@ fn batch_mode_preserves_and_deduplicates_canonical_names() {
 }
 
 #[test]
+fn batch_mode_normalizes_warm_in_process_lane_name() {
+    let names = normalize_run_frameworks(&["xberg-markdown-layout-steady-state".to_string()], true);
+
+    assert_eq!(names, ["xberg-markdown-layout-steady-state-batch"]);
+}
+
+#[test]
 fn single_mode_preserves_xberg_names() {
     let names = normalize_run_frameworks(&["xberg-markdown-baseline".to_string()], false);
     assert_eq!(names, ["xberg-markdown-baseline"]);

@@ -4,7 +4,7 @@
 //! in JSON format.
 
 use crate::stats::percentile_r7;
-use crate::types::{BenchmarkResult, ErrorKind, successful_performance_samples};
+use crate::types::{BenchmarkResult, ErrorKind, expand_performance_iterations, successful_performance_samples};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -294,8 +294,10 @@ fn sorted_finite(values: impl Iterator<Item = f64>) -> Vec<f64> {
     sorted
 }
 
-fn calculate_timing_stats(results: &[&BenchmarkResult], successful_results: &[&BenchmarkResult]) -> TimingStats {
-    let performance_results = successful_performance_samples(results.iter().copied());
+fn calculate_timing_stats(results: &[&BenchmarkResult]) -> TimingStats {
+    let expanded_results = expand_performance_iterations(results);
+    let expanded_refs: Vec<&BenchmarkResult> = expanded_results.iter().collect();
+    let performance_results = successful_performance_samples(expanded_refs.iter().copied());
 
     let mut durations: Vec<f64> = performance_results
         .iter()
@@ -305,8 +307,9 @@ fn calculate_timing_stats(results: &[&BenchmarkResult], successful_results: &[&B
     durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let extraction_durations = sorted_finite(
-        successful_results
+        expanded_refs
             .iter()
+            .filter(|result| result.success)
             .filter_map(|r| r.extraction_duration.map(|d| d.as_secs_f64() * 1000.0)),
     );
 
@@ -409,7 +412,7 @@ fn calculate_framework_stats(results: &[&BenchmarkResult]) -> FrameworkExtension
     }
 
     let successful_results: Vec<&BenchmarkResult> = results.iter().copied().filter(|result| result.success).collect();
-    let timing = calculate_timing_stats(results, &successful_results);
+    let timing = calculate_timing_stats(results);
     let quality = calculate_quality_averages(&successful_results);
 
     FrameworkExtensionStats {

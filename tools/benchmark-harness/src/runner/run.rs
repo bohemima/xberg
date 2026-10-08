@@ -203,15 +203,17 @@ impl BenchmarkRunner {
 
     async fn warmup_frameworks(&mut self, frameworks: &[Arc<dyn FrameworkAdapter>], use_batch: bool) -> Result<()> {
         for adapter in frameworks {
-            if use_batch
-                && adapter
-                    .batch_capability()
-                    .is_some_and(|capability| capability.timing_scope == BatchTimingScope::ColdEndToEndSubprocess)
-            {
-                println!(
-                    "Skipping warmup for {}: each batch invocation is measured cold end-to-end",
-                    adapter.name()
-                );
+            if use_batch && let Some(capability) = adapter.batch_capability() {
+                match capability.timing_scope {
+                    BatchTimingScope::ColdEndToEndSubprocess => println!(
+                        "Skipping warmup for {}: each batch invocation is measured cold end-to-end",
+                        adapter.name()
+                    ),
+                    BatchTimingScope::WarmSteadyState => println!(
+                        "Deferring warmup for {} to discarded full-batch iterations; no single-file cold-start sample is recorded",
+                        adapter.name()
+                    ),
+                }
                 continue;
             }
             self.warmup_single_framework(adapter, frameworks).await?;

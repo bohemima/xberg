@@ -99,6 +99,7 @@ impl SubprocessAdapter {
         };
         let entry_point: &[u8] = match self.batch_capability.map(|capability| capability.entry_point) {
             Some(BatchEntryPoint::XbergCliExtractBatch) => b"xberg-cli-extract-batch",
+            Some(BatchEntryPoint::XbergRustEngineExtractBatch) => b"xberg-rust-engine-extract-batch",
             Some(BatchEntryPoint::DoclingJobkit) => b"docling-jobkit",
             Some(BatchEntryPoint::LiteparseBatchParse) => b"liteparse-batch-parse",
             Some(BatchEntryPoint::MineruDoParse) => b"mineru-do-parse",
