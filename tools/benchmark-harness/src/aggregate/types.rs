@@ -1,13 +1,13 @@
-//! Schema types for the aggregated benchmark output (v2.9.0).
+//! Schema types for the aggregated benchmark output (v2.10.0).
 //!
 //! Pure data definitions only — see [`super`] for the aggregation logic that populates them.
 
-use crate::types::OutputFormat;
+use crate::types::{OutputFormat, TimingRegime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Schema version for the aggregated output format.
-pub const SCHEMA_VERSION: &str = "2.9.0";
+pub const SCHEMA_VERSION: &str = "2.10.0";
 
 /// Consolidated results using aggregation format v2.8.0.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +76,9 @@ pub struct PerFixtureRow {
     pub output_format: OutputFormat,
     /// Execution mode (single, batch, etc.)
     pub execution_mode: String,
+    /// Process lifecycle represented by this measurement. ~keep
+    #[serde(default = "crate::types::unknown_timing_regime")]
+    pub timing_regime: TimingRegime,
     /// Whether OCR was actually used, or `null` when the framework did not report it.
     pub ocr: Option<bool>,
     /// Fixture ID (e.g., from file path)
@@ -385,6 +388,9 @@ pub struct FrameworkModeAggregation {
     pub output_format: OutputFormat,
     /// Mode: "single", "batch", "sync", "async"
     pub mode: String,
+    /// Process lifecycle shared by every result in this aggregation. ~keep
+    #[serde(default = "crate::types::unknown_timing_regime")]
+    pub timing_regime: TimingRegime,
     /// Cold start duration statistics (if available)
     pub cold_start: Option<DurationPercentiles>,
     /// Process metrics deduplicated across all file-type and OCR buckets.

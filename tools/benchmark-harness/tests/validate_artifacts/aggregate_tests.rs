@@ -45,6 +45,90 @@ fn accepts_exact_ocr_aggregate_contract() {
 }
 
 #[test]
+fn rejects_warm_timing_regime_in_cold_release_aggregate() {
+    let contract = Cohort::Native.contract();
+    let mut aggregate = build_aggregate(&contract, Cohort::Native);
+    aggregate.by_framework_mode.values_mut().next().unwrap().timing_regime =
+        benchmark_harness::types::TimingRegime::WarmInProcess;
+    let (_root, path) = write_aggregate(&aggregate);
+
+    assert_err_contains(
+        validate(&aggregate_args(Cohort::Native, path)),
+        "timing regime mismatch",
+    );
+}
+
+#[test]
+fn rejects_missing_timing_regime_in_release_aggregate() {
+    let contract = Cohort::Native.contract();
+    let aggregate = build_aggregate(&contract, Cohort::Native);
+    let mut value = serde_json::to_value(&aggregate).unwrap();
+    let group = value["by_framework_mode"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .next()
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    group.remove("timing_regime");
+    let (_root, path) = write_json_value(&value);
+
+    assert_err_contains(
+        validate(&aggregate_args(Cohort::Native, path)),
+        "timing regime mismatch",
+    );
+}
+
+#[test]
+fn rejects_non_isolated_resource_scope_in_release_aggregate_provenance_and_rows() {
+    for target_provenance in [true, false] {
+        let contract = Cohort::Native.contract();
+        let mut aggregate = build_aggregate(&contract, Cohort::Native);
+        if target_provenance {
+            aggregate.run_provenance[0].provenance.as_mut().unwrap().frameworks[0].resource_measurement_scope =
+                benchmark_harness::types::ResourceMeasurementScope::HarnessProcessLatencyOnly;
+        } else {
+            aggregate.per_fixture_results[0]
+                .framework_capabilities
+                .resource_measurement_scope =
+                benchmark_harness::types::ResourceMeasurementScope::HarnessProcessLatencyOnly;
+        }
+        let (_root, path) = write_aggregate(&aggregate);
+
+        assert_err_contains(
+            validate(&aggregate_args(Cohort::Native, path)),
+            "resource measurement scope mismatch",
+        );
+    }
+}
+
+#[test]
+fn rejects_missing_resource_scope_in_release_aggregate_provenance_and_rows() {
+    for target_provenance in [true, false] {
+        let contract = Cohort::Native.contract();
+        let aggregate = build_aggregate(&contract, Cohort::Native);
+        let mut value = serde_json::to_value(&aggregate).unwrap();
+        let object = if target_provenance {
+            value["run_provenance"][0]["provenance"]["frameworks"][0]
+                .as_object_mut()
+                .unwrap()
+        } else {
+            value["per_fixture_results"][0]["framework_capabilities"]
+                .as_object_mut()
+                .unwrap()
+        };
+        object.remove("resource_measurement_scope");
+        let (_root, path) = write_json_value(&value);
+
+        assert_err_contains(
+            validate(&aggregate_args(Cohort::Native, path)),
+            "resource measurement scope mismatch",
+        );
+    }
+}
+
+#[test]
 fn rejects_aggregate_row_when_nested_quality_is_removed_for_a_ground_truth_fixture() {
     let contract = Cohort::Native.contract();
     let aggregate = build_aggregate(&contract, Cohort::Native);

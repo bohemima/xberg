@@ -1,8 +1,8 @@
-//! Aggregation module for benchmark results (v2.9.0 output schema).
+//! Aggregation module for benchmark results (v2.10.0 output schema).
 //!
 //! Groups [`BenchmarkResult`] records by framework-and-mode, output format, file type, and
 //! OCR usage (yes/no), then computes percentile-based statistics for each
-//! group. The output schema (`schema_version: "2.9.0"`) surfaces TF1 and SF1 separately
+//! group. The output schema (`schema_version: "2.10.0"`) surfaces TF1 and SF1 separately
 //! with per-fixture rows preserved and split rankings by output format, plus a cohort-wide
 //! [`FailureSummary`] rolling up framework-fault vs infrastructure failures (v2.9.0+).
 //!
@@ -88,16 +88,18 @@ pub fn aggregate_new_format(results: &[BenchmarkResult]) -> NewConsolidatedResul
     let aggregated_by_framework_mode = build_framework_mode_aggregations(grouped.by_framework_mode_format);
     let per_fixture_results = build_per_fixture_results(results);
     let framework_count = count_logical_frameworks(results);
+    let competitive_aggregations: HashMap<String, FrameworkModeAggregation> = aggregated_by_framework_mode
+        .iter()
+        .filter(|(_, aggregation)| aggregation.timing_regime == crate::types::TimingRegime::ColdProcess)
+        .map(|(key, aggregation)| (key.clone(), aggregation.clone()))
+        .collect();
 
     let metadata = ConsolidationMetadata {
         total_results: results.len(),
         framework_count,
         file_type_count: grouped.file_types.len(),
-        shared_corpus_markdown: resolve_shared_corpus_file_types(&aggregated_by_framework_mode, OutputFormat::Markdown),
-        shared_corpus_plaintext: resolve_shared_corpus_file_types(
-            &aggregated_by_framework_mode,
-            OutputFormat::Plaintext,
-        ),
+        shared_corpus_markdown: resolve_shared_corpus_file_types(&competitive_aggregations, OutputFormat::Markdown),
+        shared_corpus_plaintext: resolve_shared_corpus_file_types(&competitive_aggregations, OutputFormat::Plaintext),
         timestamp: chrono::Utc::now().to_rfc3339(),
         disk_size_conflicts: grouped.disk_size_conflicts,
     };
@@ -226,6 +228,16 @@ fn build_framework_mode_aggregations(
             .next()
             .map(|r| r.output_format)
             .unwrap_or(OutputFormat::Markdown);
+        let mut timing_regimes = file_type_results
+            .values()
+            .flatten()
+            .map(|result| result.framework_capabilities.timing_regime);
+        let first_timing_regime = timing_regimes.next().unwrap_or_default();
+        let timing_regime = if timing_regimes.all(|regime| regime == first_timing_regime) {
+            first_timing_regime
+        } else {
+            crate::types::TimingRegime::Mixed
+        };
 
         let (framework, mode) = parse_aggregate_key(&framework_mode_format_key);
 
@@ -252,6 +264,7 @@ fn build_framework_mode_aggregations(
                 framework: framework.to_string(),
                 output_format,
                 mode: mode.to_string(),
+                timing_regime,
                 cold_start,
                 overall_performance,
                 by_file_type,
@@ -364,6 +377,7 @@ fn build_per_fixture_results(results: &[BenchmarkResult]) -> Vec<PerFixtureRow> 
             framework: framework.to_string(),
             output_format: result.output_format,
             execution_mode: mode.to_string(),
+            timing_regime: result.framework_capabilities.timing_regime,
             ocr,
             fixture_id,
             file_type: result.file_extension.clone(),

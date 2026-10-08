@@ -10,7 +10,7 @@
 
 use crate::{
     adapter::{ExecutableBuildIdentity, declared_ocr_language_policy},
-    adapters::subprocess::SubprocessAdapter,
+    adapters::{native::NativeAdapter, subprocess::SubprocessAdapter},
     error::Result,
     types::{BatchCapability, BatchEntryPoint, BatchTimingScope, OutputFormat, XbergPdfBackend, XbergPipeline},
 };
@@ -256,6 +256,69 @@ pub fn create_xberg_adapter(
     }
 
     Ok(adapter)
+}
+
+/// Creates an in-process Xberg adapter for steady-state latency measurements. ~keep
+///
+/// Only baseline and layout are exposed initially. The paired subprocess adapter is retained
+/// solely to measure a separate cold CLI start; measured extractions use the same Rust process
+/// as their discarded warmup iteration.
+pub fn create_xberg_steady_adapter(
+    pipeline: XbergPipeline,
+    output_format: OutputFormat,
+    ocr_enabled: bool,
+    pdf_backend: XbergPdfBackend,
+    max_threads: Option<usize>,
+) -> Result<NativeAdapter> {
+    if !matches!(pipeline, XbergPipeline::Baseline | XbergPipeline::Layout) {
+        return Err(crate::Error::Config(format!(
+            "steady-state Xberg adapter does not yet support pipeline '{}'",
+            pipeline.as_str()
+        )));
+    }
+
+    let config = steady_extraction_config(pipeline, output_format, ocr_enabled, pdf_backend, max_threads)?;
+    let cold_adapter = match max_threads {
+        Some(max_threads) => create_xberg_adapter(pipeline, output_format, false, ocr_enabled, pdf_backend)?
+            .with_xberg_max_threads(max_threads),
+        None => create_xberg_adapter(pipeline, output_format, false, ocr_enabled, pdf_backend)?,
+    };
+    let name = format!(
+        "{}-steady-state",
+        xberg_framework_name(pipeline, output_format, false, pdf_backend)
+    );
+    Ok(NativeAdapter::with_identity_and_cold_adapter(
+        name,
+        config,
+        cold_adapter,
+    ))
+}
+
+fn steady_extraction_config(
+    pipeline: XbergPipeline,
+    output_format: OutputFormat,
+    ocr_enabled: bool,
+    pdf_backend: XbergPdfBackend,
+    max_threads: Option<usize>,
+) -> Result<xberg::ExtractionConfig> {
+    let mut config: xberg::ExtractionConfig = serde_json::from_str(benchmark_config_json(ocr_enabled))?;
+    config.output_format = match output_format {
+        OutputFormat::Markdown => xberg::OutputFormat::Markdown,
+        OutputFormat::Plaintext => xberg::OutputFormat::Plain,
+    };
+    config.pdf_options.get_or_insert_with(Default::default).backend = match pdf_backend {
+        XbergPdfBackend::Native => xberg::PdfBackend::Native,
+        XbergPdfBackend::Pdfium => xberg::PdfBackend::Pdfium,
+    };
+    if let Some(max_threads) = max_threads {
+        config.concurrency.get_or_insert_with(Default::default).max_threads = Some(max_threads);
+    }
+    if pipeline == XbergPipeline::Layout {
+        config.layout = Some(xberg::LayoutDetectionConfig::default());
+        config.use_layout_for_markdown = true;
+    }
+
+    Ok(config)
 }
 
 fn probe_xberg_build_id(path: &Path) -> Result<String> {
@@ -622,6 +685,71 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("requires OCR"));
+    }
+
+    #[test]
+    fn steady_baseline_and_layout_configs_match_cli_semantics() {
+        let baseline = steady_extraction_config(
+            XbergPipeline::Baseline,
+            OutputFormat::Plaintext,
+            false,
+            XbergPdfBackend::Native,
+            None,
+        )
+        .unwrap();
+        assert!(!baseline.use_cache);
+        assert_eq!(baseline.output_format, xberg::OutputFormat::Plain);
+        assert!(baseline.layout.is_none());
+        assert!(!baseline.use_layout_for_markdown);
+
+        let layout = steady_extraction_config(
+            XbergPipeline::Layout,
+            OutputFormat::Markdown,
+            true,
+            XbergPdfBackend::Native,
+            Some(3),
+        )
+        .unwrap();
+        assert_eq!(layout.output_format, xberg::OutputFormat::Markdown);
+        assert!(layout.layout.is_some());
+        assert!(layout.use_layout_for_markdown);
+        assert!(layout.force_ocr);
+        assert_eq!(layout.concurrency.as_ref().and_then(|value| value.max_threads), Some(3));
+        assert_eq!(layout.ocr.as_ref().map(|ocr| ocr.backend.as_str()), Some("tesseract"));
+    }
+
+    #[test]
+    fn steady_adapter_rejects_unimplemented_pipeline() {
+        let error = match create_xberg_steady_adapter(
+            XbergPipeline::SceptreOrt,
+            OutputFormat::Markdown,
+            true,
+            XbergPdfBackend::Native,
+            None,
+        ) {
+            Ok(_) => panic!("unsupported steady pipeline must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("does not yet support"));
+    }
+
+    #[test]
+    fn steady_and_cold_probe_share_forced_tesseract_config() {
+        let steady = steady_extraction_config(
+            XbergPipeline::Layout,
+            OutputFormat::Markdown,
+            true,
+            XbergPdfBackend::Native,
+            Some(4),
+        )
+        .unwrap();
+        let cold: xberg::ExtractionConfig = serde_json::from_str(benchmark_config_json(true)).unwrap();
+
+        assert!(steady.force_ocr);
+        assert!(cold.force_ocr);
+        assert_eq!(steady.ocr.as_ref().map(|ocr| ocr.backend.as_str()), Some("tesseract"));
+        assert_eq!(cold.ocr.as_ref().map(|ocr| ocr.backend.as_str()), Some("tesseract"));
+        assert_eq!(steady.concurrency.as_ref().and_then(|value| value.max_threads), Some(4));
     }
 
     #[test]

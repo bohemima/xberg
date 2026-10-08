@@ -17,9 +17,8 @@ CLI (clap)
  |
  +-- run              --> AdapterRegistry --> BenchmarkRunner --> results.json
  |                         |
- |                         +-- NativeAdapter (in-process Xberg)
- |                         +-- SubprocessAdapter (persistent child process)
- |                         +-- BatchSubprocessAdapter (batch API)
+ |                         +-- SubprocessAdapter (fresh process per invocation)
+ |                         +-- NativeAdapter (opt-in Xberg steady-state diagnostics)
  |
  +-- compare          --> ComparisonConfig --> Pipeline extraction --> Quality scoring
  +-- pipeline-benchmark --> 6-path matrix --> TF1/SF1 scoring --> Triage tables
@@ -38,7 +37,7 @@ CLI (clap)
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `main.rs`                           | CLI entry point (clap subcommands)                                                                                         |
 | `adapter.rs`                        | `FrameworkAdapter` trait definition                                                                                        |
-| `adapters/`                         | Adapter implementations: subprocess (persistent/batch), native (in-process), and Xberg CLI factories                |
+| `adapters/`                         | Fresh-process subprocess adapters, opt-in in-process Xberg adapter, and Xberg CLI factories                         |
 | `runner.rs`                         | Benchmark orchestration, iteration control, resource monitoring                                                            |
 | `quality.rs`                        | Combined TF1/SF1 quality scoring                                                                                           |
 | `markdown_quality.rs`               | Markdown block parsing and reading-order helpers                                                                           |
@@ -255,6 +254,21 @@ can still identify a known document by comparison, so treat reports for private 
 ### `run` -- CI benchmark execution
 
 Runs benchmarks using framework adapters with configurable iterations, warmup, and sharding.
+
+The default framework matrix reports `cold_process`: each measured invocation starts a fresh
+framework process, with downloaded artifacts and host filesystem caches left warm. Opt-in
+`xberg-{markdown|plaintext}-{baseline|layout}-steady-state` frameworks report
+`warm_in_process`: every document receives discarded warmup iterations in the same Rust process
+before its measured iterations. These diagnostic rows remain in detailed output but are excluded
+from cross-framework rankings, because the competitor adapters do not yet expose equivalent
+persistent request protocols. `--warmup 0` is rejected for a steady-state adapter.
+The steady adapter reports `resource_measurement_scope: harness_process_latency_only`: absolute
+RSS and CPU belong to the long-lived harness rather than an isolated framework process, so their
+raw numeric fields are zeroed as unavailable and excluded from memory/CPU aggregate distributions.
+Latency and throughput remain valid. The separate cold CLI probe is attached to exactly one result
+for that framework, avoiding duplicate cold-start samples.
+Missing lifecycle or resource-scope metadata deserializes as `unknown`; release validation rejects
+it rather than assuming a cold, isolated-process measurement.
 
 ```bash
 benchmark-harness run \

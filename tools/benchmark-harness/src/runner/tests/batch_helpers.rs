@@ -2,7 +2,8 @@
 
 use crate::adapter::OcrLanguagePolicy;
 use crate::runner::helpers::{
-    average_durations, ensure_batch_result_cardinality, fixed_batch_ranges, language_partitions,
+    average_durations, ensure_batch_result_cardinality, ensure_measured_iteration_count, fixed_batch_ranges,
+    language_partitions, validate_timing_regime_contract,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,6 +14,27 @@ fn fixed_batch_ranges_are_complete_and_ordered() {
     let legacy_batch = fixed_batch_ranges(3, None).unwrap();
     assert_eq!(legacy_batch.len(), 1);
     assert_eq!(legacy_batch[0], 0..3);
+}
+
+#[test]
+fn warm_in_process_regime_requires_a_discarded_warmup() {
+    assert!(validate_timing_regime_contract([crate::types::TimingRegime::WarmInProcess], 1).is_ok());
+    let error = validate_timing_regime_contract([crate::types::TimingRegime::WarmInProcess], 0)
+        .expect_err("a false steady-state claim without warmup must fail");
+    assert!(error.to_string().contains("require at least one"));
+    assert!(validate_timing_regime_contract([crate::types::TimingRegime::ColdProcess], 0).is_ok());
+    assert!(validate_timing_regime_contract([crate::types::TimingRegime::Mixed], 1).is_err());
+    assert!(validate_timing_regime_contract([crate::types::TimingRegime::Unknown], 1).is_err());
+}
+
+#[test]
+fn measured_iteration_count_rejects_missing_and_extra_jobs() {
+    assert!(ensure_measured_iteration_count("xberg", 3, 3, false).is_ok());
+    assert!(ensure_measured_iteration_count("xberg", 3, 2, false).is_err());
+    assert!(ensure_measured_iteration_count("xberg", 3, 4, false).is_err());
+    assert!(ensure_measured_iteration_count("xberg", 3, 1, true).is_ok());
+    assert!(ensure_measured_iteration_count("xberg", 3, 4, true).is_err());
+    assert!(ensure_measured_iteration_count("xberg", 3, 0, true).is_err());
 }
 
 #[test]

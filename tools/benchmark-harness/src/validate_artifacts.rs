@@ -34,8 +34,8 @@ mod raw_artifacts;
 /// Provenance schema version every `provenance.json` must record.
 ///
 /// Mirrors the private `PROVENANCE_SCHEMA_VERSION` constant in [`crate::provenance`]; kept as a
-/// named constant here (rather than a literal `2`) because that constant is not exported.
-const EXPECTED_PROVENANCE_SCHEMA_VERSION: u32 = 2;
+/// named constant here rather than repeating an unexplained version number because that constant is not exported. ~keep
+const EXPECTED_PROVENANCE_SCHEMA_VERSION: u32 = 3;
 
 /// Inputs for [`validate`], mirroring the Python script's `argparse` surface.
 #[derive(Debug, Clone)]

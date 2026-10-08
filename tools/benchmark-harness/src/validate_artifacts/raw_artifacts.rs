@@ -133,6 +133,14 @@ fn validate_provenance_framework(
     require(
         framework.ocr_language_policy == declared_ocr_language_policy(&expected.entry.framework),
         format!("{}: OCR language policy mismatch", path.display()),
+    )?;
+    require(
+        framework.timing_regime == crate::types::TimingRegime::ColdProcess,
+        format!("{}: timing regime mismatch", path.display()),
+    )?;
+    require(
+        framework.resource_measurement_scope == crate::types::ResourceMeasurementScope::IsolatedProcess,
+        format!("{}: resource measurement scope mismatch", path.display()),
     )
 }
 
@@ -290,6 +298,15 @@ fn validate_one_result(
     require(
         result.output_format == expected.entry.output_format,
         format!("{}: result {index} format mismatch", path.display()),
+    )?;
+    require(
+        result.framework_capabilities.timing_regime == crate::types::TimingRegime::ColdProcess,
+        format!("{}: result {index} timing regime mismatch", path.display()),
+    )?;
+    require(
+        result.framework_capabilities.resource_measurement_scope
+            == crate::types::ResourceMeasurementScope::IsolatedProcess,
+        format!("{}: result {index} resource measurement scope mismatch", path.display()),
     )?;
     validate_result_outcome(index, result, path, expected_fixture, expected)?;
     validate_result_ocr_and_iterations(index, result, path, expected)

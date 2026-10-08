@@ -44,6 +44,11 @@ pub(super) struct TaskErrorAdapter {
     pub(super) calls: AtomicUsize,
 }
 
+pub(super) struct StatefulWarmAdapter {
+    pub(super) calls: Arc<AtomicUsize>,
+    pub(super) timeout_on_call: Option<usize>,
+}
+
 pub(super) struct RecordingBatchAdapter {
     pub(super) batches: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
 }
@@ -77,9 +82,69 @@ impl RecordingBatchAdapter {
 }
 
 #[async_trait::async_trait]
+impl FrameworkAdapter for StatefulWarmAdapter {
+    fn name(&self) -> &str {
+        "stateful-warm"
+    }
+
+    fn timing_regime(&self) -> crate::types::TimingRegime {
+        crate::types::TimingRegime::WarmInProcess
+    }
+
+    fn supports_format(&self, file_type: &str) -> bool {
+        file_type == "pdf"
+    }
+
+    fn supported_output_formats(&self) -> Vec<OutputFormat> {
+        vec![OutputFormat::Markdown]
+    }
+
+    async fn extract(
+        &self,
+        file_path: &Path,
+        _timeout: Duration,
+        _force_ocr: bool,
+        _ocr_language: Option<&str>,
+        output_format: OutputFormat,
+    ) -> Result<BenchmarkResult> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let timed_out = self.timeout_on_call == Some(call);
+        Ok(BenchmarkResult {
+            framework: self.name().to_string(),
+            output_format,
+            file_path: file_path.to_path_buf(),
+            file_size: 1,
+            success: !timed_out,
+            error_message: timed_out.then(|| "intentional timeout".to_string()),
+            error_kind: if timed_out { ErrorKind::Timeout } else { ErrorKind::None },
+            duration: Duration::from_millis(1),
+            extraction_duration: Some(Duration::from_millis(1)),
+            subprocess_overhead: Some(Duration::ZERO),
+            metrics: PerformanceMetrics::default(),
+            quality: None,
+            iterations: vec![],
+            statistics: None,
+            cold_start_duration: None,
+            file_extension: "pdf".to_string(),
+            framework_capabilities: FrameworkCapabilities {
+                timing_regime: crate::types::TimingRegime::WarmInProcess,
+                ..Default::default()
+            },
+            pdf_metadata: None,
+            ocr_status: OcrStatus::NotUsed,
+            extracted_text: (!timed_out).then(|| format!("call-{call}")),
+            system_load: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
 impl FrameworkAdapter for RecordingBatchAdapter {
     fn name(&self) -> &str {
         "recording"
+    }
+    fn timing_regime(&self) -> crate::types::TimingRegime {
+        crate::types::TimingRegime::ColdProcess
     }
 
     fn supports_format(&self, file_type: &str) -> bool {
@@ -134,13 +199,16 @@ impl FrameworkAdapter for RecordingBatchAdapter {
 /// used to drive the `run()` quality-scoring loop's silent-zero reclassification with a
 /// controlled extracted-text/ground-truth pairing.
 pub(super) struct ScriptedTextAdapter {
-    text: String,
+    pub(super) text: String,
 }
 
 #[async_trait::async_trait]
 impl FrameworkAdapter for ScriptedTextAdapter {
     fn name(&self) -> &str {
         "scripted-text"
+    }
+    fn timing_regime(&self) -> crate::types::TimingRegime {
+        crate::types::TimingRegime::ColdProcess
     }
 
     fn supports_format(&self, file_type: &str) -> bool {
@@ -266,6 +334,9 @@ impl FrameworkAdapter for SequenceAdapter {
     fn name(&self) -> &str {
         "sequence"
     }
+    fn timing_regime(&self) -> crate::types::TimingRegime {
+        crate::types::TimingRegime::ColdProcess
+    }
 
     fn supports_format(&self, _file_type: &str) -> bool {
         true
@@ -311,6 +382,9 @@ impl FrameworkAdapter for TeardownAdapter {
     fn name(&self) -> &str {
         self.name
     }
+    fn timing_regime(&self) -> crate::types::TimingRegime {
+        crate::types::TimingRegime::ColdProcess
+    }
 
     fn supports_format(&self, _file_type: &str) -> bool {
         true
@@ -354,6 +428,9 @@ impl FrameworkAdapter for TeardownAdapter {
 impl FrameworkAdapter for FailedWarmupAdapter {
     fn name(&self) -> &str {
         "xberg-failed-warmup"
+    }
+    fn timing_regime(&self) -> crate::types::TimingRegime {
+        crate::types::TimingRegime::ColdProcess
     }
 
     fn supports_format(&self, file_type: &str) -> bool {
@@ -407,6 +484,9 @@ impl FrameworkAdapter for FailedWarmupAdapter {
 impl FrameworkAdapter for NonFatalWarmupFailureAdapter {
     fn name(&self) -> &str {
         "docling-flaky-warmup"
+    }
+    fn timing_regime(&self) -> crate::types::TimingRegime {
+        crate::types::TimingRegime::ColdProcess
     }
 
     fn supports_format(&self, file_type: &str) -> bool {
@@ -466,6 +546,9 @@ impl FrameworkAdapter for NonFatalWarmupFailureAdapter {
 impl FrameworkAdapter for TaskErrorAdapter {
     fn name(&self) -> &str {
         "task-error"
+    }
+    fn timing_regime(&self) -> crate::types::TimingRegime {
+        crate::types::TimingRegime::ColdProcess
     }
 
     fn supports_format(&self, file_type: &str) -> bool {

@@ -39,7 +39,11 @@ pub(super) fn create_test_result(
         statistics: None,
         cold_start_duration: Some(Duration::from_millis(500)),
         file_extension: file_ext.to_string(),
-        framework_capabilities: FrameworkCapabilities::default(),
+        framework_capabilities: FrameworkCapabilities {
+            timing_regime: crate::types::TimingRegime::ColdProcess,
+            resource_measurement_scope: crate::types::ResourceMeasurementScope::IsolatedProcess,
+            ..Default::default()
+        },
         pdf_metadata: None,
         ocr_status,
         output_format: OutputFormat::Markdown,

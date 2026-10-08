@@ -3,7 +3,9 @@
 //! no-op setup/teardown hooks.
 
 use crate::adapter::FrameworkAdapter;
-use crate::types::{BatchCapability, BatchEntryPoint, BenchmarkResult, OutputFormat};
+use crate::types::{
+    BatchCapability, BatchEntryPoint, BenchmarkResult, OutputFormat, ResourceMeasurementScope, TimingRegime,
+};
 use crate::{Error, Result};
 use async_trait::async_trait;
 use std::path::Path;
@@ -65,6 +67,12 @@ fn first_output_line(output: std::process::Output) -> Option<String> {
 impl FrameworkAdapter for SubprocessAdapter {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn timing_regime(&self) -> TimingRegime {
+        TimingRegime::ColdProcess
+    }
+    fn resource_measurement_scope(&self) -> ResourceMeasurementScope {
+        ResourceMeasurementScope::IsolatedProcess
     }
     fn supports_format(&self, file_type: &str) -> bool {
         let file_type_lower = file_type.to_lowercase();

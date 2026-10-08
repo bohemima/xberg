@@ -12,7 +12,7 @@ use std::sync::Arc;
 use super::execution::{BatchIterationTask, SingleIterationTask};
 use super::helpers::{
     ensure_batch_result_cardinality, fixed_batch_ranges, language_partitions, load_quality_ground_truth,
-    validate_batch_ocr_cohort, validate_ocr_cohort,
+    validate_batch_ocr_cohort, validate_ocr_cohort, validate_timing_regime_contract,
 };
 use super::{BatchBenchmarkEntry, BenchmarkRunner, SingleBenchmarkTask};
 
@@ -267,7 +267,7 @@ impl BenchmarkRunner {
             .map(|(_, _, _, language)| language.clone())
             .collect();
         let original_indexes: Vec<usize> = batch_entries.iter().map(|(index, _, _, _)| *index).collect();
-        let cold_start = self.cold_start_durations.get(adapter_name).copied();
+        let cold_start = self.cold_start_durations.remove(adapter_name);
 
         let batch_task = BatchIterationTask {
             file_paths,
@@ -388,7 +388,7 @@ impl BenchmarkRunner {
         let mut results = Vec::new();
 
         for (file_path, framework_name, adapter, force_ocr, ocr_language) in task_queue {
-            let cold_start = self.cold_start_durations.get(&framework_name).copied();
+            let cold_start = self.cold_start_durations.remove(&framework_name);
             let task = SingleIterationTask {
                 file_path: &file_path,
                 adapter,
@@ -439,6 +439,10 @@ impl BenchmarkRunner {
 
         let use_batch = matches!(self.config.benchmark_mode, BenchmarkMode::Batch);
         validate_batch_capable_frameworks(use_batch, &frameworks)?;
+        validate_timing_regime_contract(
+            frameworks.iter().map(|adapter| adapter.timing_regime()),
+            self.config.warmup_iterations,
+        )?;
 
         self.validate_fixture_cohort(use_batch)?;
         self.ensure_all_fixture_documents_exist()?;

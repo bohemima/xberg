@@ -1,12 +1,16 @@
 //! Native Xberg Rust adapter
 //!
-//! This adapter uses the Xberg Rust core library directly for maximum performance.
-//! It serves as the baseline for comparing language bindings.
+//! This adapter measures same-process Xberg extraction latency after a configured warmup.
+//! Its rows are reported separately from cold-process competitive rankings.
 
 use crate::adapter::FrameworkAdapter;
+use crate::adapters::subprocess::SubprocessAdapter;
 use crate::extract_xberg_file;
 use crate::monitoring::{ResourceMonitor, ResourceStats};
-use crate::types::{BenchmarkResult, ErrorKind, FrameworkCapabilities, OcrStatus, PerformanceMetrics};
+use crate::types::{
+    BenchmarkResult, ErrorKind, FrameworkCapabilities, OcrStatus, PerformanceMetrics, ResourceMeasurementScope,
+    TimingRegime,
+};
 use crate::{Error, Result};
 use async_trait::async_trait;
 use std::path::Path;
@@ -15,19 +19,35 @@ use xberg::{ExtractedDocument, ExtractionConfig, FormatMetadata};
 
 /// Assemble the metrics block every `BenchmarkResult` in this adapter carries.
 ///
-/// Failure rows report zero throughput; the memory and CPU figures are the same monitor
-/// statistics in both cases.
+/// Harness-process RSS and CPU cannot be attributed to one extraction, so these metrics are
+/// explicitly unavailable while latency and throughput remain reportable. ~keep
 fn metrics_from(resource_stats: &ResourceStats, throughput_bytes_per_sec: f64) -> PerformanceMetrics {
+    let _ = resource_stats;
     PerformanceMetrics {
-        baseline_memory_bytes: resource_stats.baseline_memory_bytes,
-        peak_memory_bytes: resource_stats.peak_memory_bytes,
-        peak_memory_delta_bytes: resource_stats.peak_memory_delta_bytes,
-        avg_cpu_percent: resource_stats.avg_cpu_percent,
-        cpu_seconds: resource_stats.cpu_seconds,
+        baseline_memory_bytes: 0,
+        peak_memory_bytes: 0,
+        peak_memory_delta_bytes: 0,
+        avg_cpu_percent: 0.0,
+        cpu_seconds: 0.0,
         throughput_bytes_per_sec,
-        p50_memory_bytes: resource_stats.p50_memory_bytes,
-        p95_memory_bytes: resource_stats.p95_memory_bytes,
-        p99_memory_bytes: resource_stats.p99_memory_bytes,
+        p50_memory_bytes: 0,
+        p95_memory_bytes: 0,
+        p99_memory_bytes: 0,
+    }
+}
+
+fn native_capabilities() -> FrameworkCapabilities {
+    FrameworkCapabilities {
+        timing_regime: TimingRegime::WarmInProcess,
+        resource_measurement_scope: ResourceMeasurementScope::HarnessProcessLatencyOnly,
+        supported_extensions: native_supported_extensions(),
+        ocr_support: true,
+        supported_output_formats: vec![
+            crate::types::OutputFormat::Markdown,
+            crate::types::OutputFormat::Plaintext,
+        ],
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        ..Default::default()
     }
 }
 
@@ -70,7 +90,7 @@ fn single_failure_result(context: SingleResultContext<'_>, error: &Error, timed_
             .and_then(|e| e.to_str())
             .unwrap_or("unknown")
             .to_lowercase(),
-        framework_capabilities: FrameworkCapabilities::default(),
+        framework_capabilities: native_capabilities(),
         pdf_metadata: None,
         ocr_status: OcrStatus::Unknown,
         extracted_text: None,
@@ -116,7 +136,7 @@ fn single_success_result(
             .and_then(|e| e.to_str())
             .unwrap_or("unknown")
             .to_lowercase(),
-        framework_capabilities: FrameworkCapabilities::default(),
+        framework_capabilities: native_capabilities(),
         pdf_metadata: None,
         ocr_status,
         extracted_text: Some(extraction_result.content),
@@ -231,7 +251,7 @@ fn batch_failure_result(
         statistics: None,
         cold_start_duration: None,
         file_extension,
-        framework_capabilities: FrameworkCapabilities::default(),
+        framework_capabilities: native_capabilities(),
         pdf_metadata: None,
         ocr_status: OcrStatus::Unknown,
         extracted_text: None,
@@ -295,7 +315,7 @@ fn batch_success_result(
         statistics: None,
         cold_start_duration: None,
         file_extension,
-        framework_capabilities: FrameworkCapabilities::default(),
+        framework_capabilities: native_capabilities(),
         pdf_metadata: None,
         ocr_status: determine_ocr_status(extraction_result, config),
         extracted_text: Some(extraction_result.content.clone()),
@@ -303,97 +323,12 @@ fn batch_success_result(
     }
 }
 
-/// Extensions the native adapter benchmarks. Kept as a flat list rather than a `matches!`
-/// arm chain so the set is one readable declaration. ~keep
-const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "pdf",
-    "docx",
-    "docm",
-    "dotx",
-    "dotm",
-    "dot",
-    "doc",
-    "odt",
-    "pptx",
-    "ppsx",
-    "pptm",
-    "potx",
-    "potm",
-    "pot",
-    "ppt",
-    "xlsx",
-    "xlsm",
-    "xlsb",
-    "xlam",
-    "xla",
-    "xltx",
-    "xlt",
-    "xls",
-    "ods",
-    "dbf",
-    "hwp",
-    "hwpx",
-    "txt",
-    "md",
-    "markdown",
-    "commonmark",
-    "html",
-    "htm",
-    "xml",
-    "rtf",
-    "rst",
-    "org",
-    "json",
-    "yaml",
-    "yml",
-    "toml",
-    "csv",
-    "tsv",
-    "eml",
-    "msg",
-    "zip",
-    "tar",
-    "gz",
-    "tgz",
-    "7z",
-    "bmp",
-    "gif",
-    "jpg",
-    "jpeg",
-    "png",
-    "tiff",
-    "tif",
-    "webp",
-    "jp2",
-    "jpx",
-    "jpm",
-    "mj2",
-    "j2k",
-    "j2c",
-    "jbig2",
-    "jb2",
-    "pnm",
-    "pbm",
-    "pgm",
-    "ppm",
-    "epub",
-    "fb2",
-    "bib",
-    "ris",
-    "nbib",
-    "enw",
-    "ipynb",
-    "tex",
-    "latex",
-    "typst",
-    "typ",
-    "opml",
-    "dbk",
-    "docbook",
-    "jats",
-    "svg",
-    "djot",
-];
+fn native_supported_extensions() -> Vec<String> {
+    xberg::list_supported_formats()
+        .into_iter()
+        .map(|format| format.extension)
+        .collect()
+}
 
 /// Determine OCR status by inspecting the actual extraction result metadata.
 ///
@@ -422,7 +357,9 @@ fn determine_ocr_status(result: &ExtractedDocument, config: &ExtractionConfig) -
 
 /// Native Rust adapter using xberg crate directly
 pub struct NativeAdapter {
+    name: String,
     config: ExtractionConfig,
+    cold_adapter: Option<SubprocessAdapter>,
 }
 
 impl NativeAdapter {
@@ -434,7 +371,11 @@ impl NativeAdapter {
             use_cache: false,
             ..Default::default()
         };
-        Self { config }
+        Self {
+            name: "xberg-rust-steady-state".to_string(),
+            config,
+            cold_adapter: None,
+        }
     }
 
     /// Clone the adapter's base config and apply the per-fixture OCR overrides.
@@ -472,7 +413,28 @@ impl NativeAdapter {
 
     /// Create a new native adapter with custom configuration
     pub fn with_config(config: ExtractionConfig) -> Self {
-        Self { config }
+        Self {
+            name: "xberg-rust-steady-state".to_string(),
+            config,
+            cold_adapter: None,
+        }
+    }
+
+    pub(crate) fn with_identity_and_cold_adapter(
+        name: String,
+        config: ExtractionConfig,
+        cold_adapter: SubprocessAdapter,
+    ) -> Self {
+        Self {
+            name,
+            config,
+            cold_adapter: Some(cold_adapter),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_separate_cold_probe(&self) -> bool {
+        self.cold_adapter.is_some()
     }
 }
 
@@ -485,11 +447,33 @@ impl Default for NativeAdapter {
 #[async_trait]
 impl FrameworkAdapter for NativeAdapter {
     fn name(&self) -> &str {
-        "xberg-rust"
+        &self.name
+    }
+
+    fn timing_regime(&self) -> TimingRegime {
+        TimingRegime::WarmInProcess
+    }
+
+    fn resource_measurement_scope(&self) -> ResourceMeasurementScope {
+        ResourceMeasurementScope::HarnessProcessLatencyOnly
     }
 
     fn supports_format(&self, file_type: &str) -> bool {
-        SUPPORTED_EXTENSIONS.contains(&file_type.to_lowercase().as_str())
+        let file_type = file_type.to_ascii_lowercase();
+        xberg::list_supported_formats()
+            .iter()
+            .any(|format| format.extension == file_type)
+    }
+
+    fn supported_output_formats(&self) -> Vec<crate::types::OutputFormat> {
+        vec![
+            crate::types::OutputFormat::Markdown,
+            crate::types::OutputFormat::Plaintext,
+        ]
+    }
+
+    fn ocr_language_policy(&self) -> crate::adapter::OcrLanguagePolicy {
+        crate::adapter::OcrLanguagePolicy::AnyPerDocument
     }
 
     async fn extract(
@@ -502,11 +486,9 @@ impl FrameworkAdapter for NativeAdapter {
     ) -> Result<BenchmarkResult> {
         let file_size = std::fs::metadata(file_path).map_err(Error::Io)?.len();
 
-        let config = self.extraction_config_for(force_ocr, ocr_language);
-
-        let monitor = ResourceMonitor::new();
-        let sampling_interval_ms = Self::calculate_adaptive_sampling_interval(file_size);
-        monitor.start(Duration::from_millis(sampling_interval_ms)).await;
+        let mut config = self.extraction_config_for(force_ocr, ocr_language);
+        let cancel_token = xberg::cancellation::CancellationToken::new();
+        config.cancel_token = Some(cancel_token.clone());
 
         let start = Instant::now();
 
@@ -516,20 +498,16 @@ impl FrameworkAdapter for NativeAdapter {
         let timed_out = timed_result.is_err();
         let extraction_result = match timed_result {
             Ok(inner) => inner.map_err(|e| Error::Benchmark(format!("Extraction failed: {}", e))),
-            Err(_) => Err(Error::Timeout(format!("Extraction exceeded {:?}", timeout))),
+            Err(_) => {
+                cancel_token.cancel();
+                Err(Error::Timeout(format!("Extraction exceeded {:?}", timeout)))
+            }
         };
 
         let extraction_duration = extraction_start.elapsed();
         let duration = start.elapsed();
 
-        let post_sample = monitor.snapshot_current_memory();
-        let mut samples = monitor.stop().await;
-        if samples.is_empty() {
-            samples.push(post_sample);
-        }
-        let snapshots = monitor.get_snapshots().await;
-        let baseline = monitor.baseline_memory().await;
-        let resource_stats = ResourceMonitor::calculate_stats(&samples, &snapshots, baseline);
+        let resource_stats = ResourceStats::default();
 
         let throughput = if duration.as_secs_f64() > 0.0 {
             file_size as f64 / duration.as_secs_f64()
@@ -645,46 +623,57 @@ impl FrameworkAdapter for NativeAdapter {
         Ok(results)
     }
 
-    fn supports_batch(&self) -> bool {
-        true
-    }
-
     fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }
 
+    fn executable_provenance(&self) -> Option<crate::provenance::ExecutableProvenance> {
+        std::env::current_exe()
+            .ok()
+            .map(|path| crate::provenance::ExecutableProvenance::from_command(&path))
+    }
+
+    fn executable_build_identity(&self) -> Option<crate::adapter::ExecutableBuildIdentity> {
+        std::env::current_exe()
+            .ok()
+            .map(|path| crate::adapter::ExecutableBuildIdentity {
+                build_id: xberg::embedded_build_id().to_string(),
+                path,
+            })
+    }
+
+    fn configured_thread_budget(&self) -> Option<usize> {
+        self.config.concurrency.as_ref().and_then(|value| value.max_threads)
+    }
+
     async fn setup(&self) -> Result<()> {
-        let warmup_pdf = tempfile::Builder::new()
-            .suffix(".pdf")
-            .tempfile()
-            .map_err(|e| Error::Benchmark(format!("Failed to create warmup file: {e}")))?;
-        std::fs::write(warmup_pdf.path(), minimal_pdf_bytes())
-            .map_err(|e| Error::Benchmark(format!("Failed to write warmup file: {e}")))?;
-        let _ = extract_xberg_file(warmup_pdf.path(), &self.config).await;
         Ok(())
     }
 
     async fn teardown(&self) -> Result<()> {
         Ok(())
     }
-}
 
-/// Minimal valid PDF document for warmup extractions.
-fn minimal_pdf_bytes() -> &'static [u8] {
-    b"%PDF-1.0
-1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
-2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
-3 0 obj<</Type/Page/MediaBox[0 0 3 3]/Parent 2 0 R/Resources<<>>>>endobj
-xref
-0 4
-0000000000 65535 f
-0000000009 00000 n
-0000000058 00000 n
-0000000115 00000 n
-trailer<</Size 4/Root 1 0 R>>
-startxref
-206
-%%EOF"
+    async fn warmup(
+        &self,
+        warmup_file: &Path,
+        timeout: Duration,
+        output_format: crate::types::OutputFormat,
+    ) -> Result<Duration> {
+        if let Some(cold_adapter) = &self.cold_adapter {
+            return cold_adapter.warmup(warmup_file, timeout, output_format).await;
+        }
+        let start = Instant::now();
+        let result = self.extract(warmup_file, timeout, false, None, output_format).await?;
+        if !result.success {
+            return Err(Error::Benchmark(
+                result
+                    .error_message
+                    .unwrap_or_else(|| "native warmup failed".to_string()),
+            ));
+        }
+        Ok(start.elapsed())
+    }
 }
 
 /// Build one batch `ExtractInput`, applying per-file OCR overrides on top of the
@@ -729,7 +718,67 @@ mod tests {
     #[tokio::test]
     async fn test_native_adapter_creation() {
         let adapter = NativeAdapter::new();
-        assert_eq!(adapter.name(), "xberg-rust");
+        assert_eq!(adapter.name(), "xberg-rust-steady-state");
+        assert_eq!(adapter.timing_regime(), TimingRegime::WarmInProcess);
+        assert_eq!(adapter.batch_capability(), None);
+        assert_eq!(
+            adapter.supported_output_formats(),
+            vec![
+                crate::types::OutputFormat::Markdown,
+                crate::types::OutputFormat::Plaintext,
+            ]
+        );
+        assert_eq!(
+            adapter.ocr_language_policy(),
+            crate::adapter::OcrLanguagePolicy::AnyPerDocument
+        );
+        assert_eq!(
+            adapter.executable_build_identity().unwrap().build_id,
+            xberg::embedded_build_id()
+        );
+        assert_eq!(adapter.configured_thread_budget(), None);
+    }
+
+    #[test]
+    fn configured_thread_budget_reports_embedded_config() {
+        let mut config = ExtractionConfig::default();
+        config.concurrency.get_or_insert_with(Default::default).max_threads = Some(3);
+        let adapter = NativeAdapter::with_config(config);
+
+        assert_eq!(adapter.configured_thread_budget(), Some(3));
+    }
+
+    #[test]
+    fn steady_adapter_retains_a_separate_subprocess_cold_probe() {
+        let cold = SubprocessAdapter::new(
+            "xberg-cold",
+            "/nonexistent/xberg",
+            Vec::new(),
+            Vec::new(),
+            vec!["pdf".to_string()],
+        );
+        let adapter = NativeAdapter::with_identity_and_cold_adapter(
+            "xberg-steady".to_string(),
+            ExtractionConfig::default(),
+            cold,
+        );
+
+        assert!(adapter.has_separate_cold_probe());
+    }
+
+    #[test]
+    fn supported_formats_match_xberg_registry() {
+        let adapter = NativeAdapter::new();
+        let expected: std::collections::BTreeSet<String> = xberg::list_supported_formats()
+            .into_iter()
+            .map(|format| format.extension)
+            .collect();
+        let actual: std::collections::BTreeSet<String> =
+            native_capabilities().supported_extensions.into_iter().collect();
+
+        assert_eq!(actual, expected);
+        assert!(expected.iter().all(|extension| adapter.supports_format(extension)));
+        assert!(!adapter.supports_format("definitely-not-a-format"));
     }
 
     fn base_config(force_ocr: bool, backend: Option<&str>) -> ExtractionConfig {
@@ -801,12 +850,25 @@ mod tests {
         std::fs::write(&file_path, "Hello, world!").unwrap();
 
         let result = adapter
-            .extract(&file_path, Duration::from_secs(10), false)
+            .extract(
+                &file_path,
+                Duration::from_secs(10),
+                false,
+                None,
+                crate::types::OutputFormat::Plaintext,
+            )
             .await
             .unwrap();
 
         assert!(result.success);
-        assert_eq!(result.framework, "xberg-rust");
+        assert_eq!(result.framework, "xberg-rust-steady-state");
+        assert_eq!(result.framework_capabilities.timing_regime, TimingRegime::WarmInProcess);
+        assert_eq!(
+            result.framework_capabilities.resource_measurement_scope,
+            ResourceMeasurementScope::HarnessProcessLatencyOnly
+        );
+        assert_eq!(result.metrics.peak_memory_bytes, 0);
+        assert_eq!(result.metrics.cpu_seconds, 0.0);
         assert!(result.duration.as_millis() < 1000);
     }
 }

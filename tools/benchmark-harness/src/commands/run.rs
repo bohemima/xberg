@@ -1,7 +1,7 @@
 //! `run`: executes benchmarks across one or more registered framework adapters.
 
 use crate::cli::CliMode;
-use benchmark_harness::adapters::create_xberg_adapter;
+use benchmark_harness::adapters::{create_xberg_adapter, create_xberg_steady_adapter};
 use benchmark_harness::provenance::{CoverageGateProvenance, FrameworkCoverageProvenance};
 use benchmark_harness::types::ErrorKind;
 use benchmark_harness::{
@@ -408,6 +408,7 @@ pub(crate) fn parse_model_provenance(values: &[String]) -> Result<Vec<ModelProve
 struct XbergRegistration<'a> {
     config: &'a BenchmarkConfig,
     batch_mode: bool,
+    has_explicit_frameworks: bool,
     ocr: bool,
     format: OutputFormat,
     should_init: &'a dyn Fn(&str) -> bool,
@@ -466,6 +467,52 @@ fn register_one_xberg_adapter(
     }
 }
 
+fn register_steady_xberg_adapter(
+    registry: &mut AdapterRegistry,
+    context: &XbergRegistration<'_>,
+    pipeline: XbergPipeline,
+    pdf_backend: XbergPdfBackend,
+) -> bool {
+    if !context.has_explicit_frameworks
+        || context.batch_mode
+        || !matches!(pipeline, XbergPipeline::Baseline | XbergPipeline::Layout)
+    {
+        return false;
+    }
+    let format_slug = match context.format {
+        OutputFormat::Markdown => "markdown",
+        OutputFormat::Plaintext => "plaintext",
+    };
+    let backend_suffix = if pdf_backend == XbergPdfBackend::Pdfium {
+        "-pdfium"
+    } else {
+        ""
+    };
+    let steady_name = format!("xberg-{format_slug}-{}{backend_suffix}-steady-state", pipeline.as_str());
+    if !(context.should_init)(&steady_name) {
+        return false;
+    }
+    match create_xberg_steady_adapter(
+        pipeline,
+        context.format,
+        context.ocr,
+        pdf_backend,
+        context.config.xberg_max_threads,
+    ) {
+        Ok(adapter) => match registry.register(Arc::new(adapter)) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(framework = %steady_name, %error, "steady-state adapter registration failed");
+                false
+            }
+        },
+        Err(error) => {
+            tracing::warn!(framework = %steady_name, %error, "steady-state adapter initialization failed");
+            false
+        }
+    }
+}
+
 /// Registers every eligible `xberg-*` adapter permutation (pipeline x pdf backend) for `run`.
 fn register_xberg_pipelines(
     registry: &mut AdapterRegistry,
@@ -504,6 +551,9 @@ fn register_xberg_pipelines(
         };
         for pdf_backend in pdf_backends {
             register_one_xberg_adapter(registry, context, *pipeline, *pdf_backend, &mut xberg_count);
+            if register_steady_xberg_adapter(registry, context, *pipeline, *pdf_backend) {
+                xberg_count += 1;
+            }
         }
     }
     xberg_count
@@ -615,6 +665,7 @@ fn build_registry(
     let context = XbergRegistration {
         config,
         batch_mode,
+        has_explicit_frameworks,
         ocr: args.ocr,
         format: parsed_format,
         should_init: &should_init,
@@ -917,4 +968,32 @@ pub(crate) async fn execute(args: RunArgs) -> Result<()> {
     print_run_summary(&results);
 
     finalize_run(&results, provenance, &failed_frameworks, &args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn steady_adapter_is_not_registered_without_explicit_selection() {
+        let config = BenchmarkConfig::default();
+        let should_init = |_name: &str| true;
+        let context = XbergRegistration {
+            config: &config,
+            batch_mode: false,
+            has_explicit_frameworks: false,
+            ocr: false,
+            format: OutputFormat::Markdown,
+            should_init: &should_init,
+        };
+        let mut registry = AdapterRegistry::new();
+
+        assert!(!register_steady_xberg_adapter(
+            &mut registry,
+            &context,
+            XbergPipeline::Layout,
+            XbergPdfBackend::Native,
+        ));
+        assert!(registry.is_empty());
+    }
 }

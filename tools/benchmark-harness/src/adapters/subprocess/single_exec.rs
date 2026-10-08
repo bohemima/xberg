@@ -1,7 +1,10 @@
 //! Single-file execution: building the subprocess command, mapping its output into a
 //! `BenchmarkResult`, and the implementation `FrameworkAdapter::extract` delegates to.
 
-use crate::types::{BenchmarkResult, ErrorKind, FrameworkCapabilities, OcrStatus, OutputFormat, PerformanceMetrics};
+use crate::types::{
+    BenchmarkResult, ErrorKind, FrameworkCapabilities, OcrStatus, OutputFormat, PerformanceMetrics,
+    ResourceMeasurementScope, TimingRegime,
+};
 use crate::{Error, Result};
 use std::path::Path;
 use std::process::Stdio;
@@ -74,8 +77,7 @@ impl SubprocessAdapter {
         Ok(Self::finish_measured_command(measured, "Subprocess"))
     }
 
-    /// Execute extraction via persistent subprocess (stdin/stdout protocol)
-    /// Build a failure `BenchmarkResult` for error paths in `extract()`.
+    /// Build a failure `BenchmarkResult` for error paths in `extract()`. ~keep
     ///
     /// Centralises the repeated pattern of constructing an error result with
     /// resource statistics, throughput, and framework capabilities.
@@ -89,6 +91,8 @@ impl SubprocessAdapter {
         output_format: OutputFormat,
     ) -> BenchmarkResult {
         let framework_capabilities = FrameworkCapabilities {
+            timing_regime: TimingRegime::ColdProcess,
+            resource_measurement_scope: ResourceMeasurementScope::IsolatedProcess,
             supported_extensions: self.supported_formats.clone(),
             ocr_support: Self::framework_supports_ocr(&self.name),
             batch_support: self.batch_capability.is_some(),
@@ -338,6 +342,8 @@ impl SubprocessAdapter {
         ocr_status: OcrStatus,
     ) -> (FrameworkCapabilities, Option<crate::types::PdfMetadata>) {
         let framework_capabilities = FrameworkCapabilities {
+            timing_regime: TimingRegime::ColdProcess,
+            resource_measurement_scope: ResourceMeasurementScope::IsolatedProcess,
             supported_extensions: self.supported_formats.clone(),
             ocr_support: Self::framework_supports_ocr(&self.name),
             batch_support: self.batch_capability.is_some(),

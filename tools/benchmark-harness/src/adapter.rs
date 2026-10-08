@@ -8,7 +8,7 @@ use crate::{
     Error, Result,
     config::BenchmarkMode,
     provenance::ExecutableProvenance,
-    types::{BatchCapability, BenchmarkResult, OutputFormat},
+    types::{BatchCapability, BenchmarkResult, OutputFormat, TimingRegime},
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -258,6 +258,16 @@ pub(crate) fn xberg_default_tesseract_psm(languages: &[String]) -> i32 {
 pub trait FrameworkAdapter: Send + Sync {
     /// Get the framework name (e.g., "xberg-rust", "xberg-python")
     fn name(&self) -> &str;
+
+    /// Process lifecycle represented by measured invocations. ~keep
+    fn timing_regime(&self) -> TimingRegime {
+        TimingRegime::Unknown
+    }
+
+    /// Process boundary represented by resource measurements. ~keep
+    fn resource_measurement_scope(&self) -> crate::types::ResourceMeasurementScope {
+        crate::types::ResourceMeasurementScope::Unknown
+    }
 
     /// Check if this adapter supports the given file type
     ///

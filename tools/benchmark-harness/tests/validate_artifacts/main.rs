@@ -256,7 +256,7 @@ fn build_provenance(
         .collect();
     let eligible_documents = eligible_languages.len();
     RunProvenance {
-        schema_version: 2,
+        schema_version: 3,
         harness_version: "test".to_string(),
         repository: RepositoryProvenance {
             commit: Some(SOURCE_SHA.to_string()),
@@ -269,6 +269,8 @@ fn build_provenance(
         },
         frameworks: vec![FrameworkProvenance {
             name: runtime_framework_name(entry),
+            timing_regime: benchmark_harness::types::TimingRegime::ColdProcess,
+            resource_measurement_scope: benchmark_harness::types::ResourceMeasurementScope::IsolatedProcess,
             version: "0.0.0".to_string(),
             executable: None,
             models: Vec::new(),
@@ -351,7 +353,11 @@ fn build_results(
                 statistics: None,
                 cold_start_duration: None,
                 file_extension: (*extension).to_string(),
-                framework_capabilities: FrameworkCapabilities::default(),
+                framework_capabilities: FrameworkCapabilities {
+                    timing_regime: benchmark_harness::types::TimingRegime::ColdProcess,
+                    resource_measurement_scope: benchmark_harness::types::ResourceMeasurementScope::IsolatedProcess,
+                    ..Default::default()
+                },
                 pdf_metadata: None,
                 ocr_status: if cohort.expects_ocr() {
                     OcrStatus::Used

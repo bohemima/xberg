@@ -1,4 +1,4 @@
-# Aggregation Schema v2.9.0
+# Aggregation Schema v2.10.0
 
 This document describes the structure of `aggregated.json` produced by `benchmark-harness consolidate`.
 
@@ -6,7 +6,7 @@ This document describes the structure of `aggregated.json` produced by `benchmar
 
 ```json
 {
-  "schema_version": "2.9.0",
+  "schema_version": "2.10.0",
   "by_framework_mode": {
     "<aggregate_key>": {
       /* FrameworkModeAggregation */
@@ -69,6 +69,7 @@ Each entry contains:
   "framework": "string", // Framework name without mode suffix
   "output_format": "markdown|plaintext", // Output format used
   "mode": "single|batch|...", // Execution mode
+  "timing_regime": "cold_process|warm_in_process|mixed|unknown", // Process lifecycle measured (v2.10.0+); mixed is aggregate-only, unknown is unranked
   "cold_start": {
     /* DurationPercentiles */
   }, // Optional, if cold start data available
@@ -194,6 +195,7 @@ The batch dedup that collapses a native batch to one `performance_sample_count` 
   "framework": "xberg-markdown-baseline",
   "output_format": "markdown",
   "execution_mode": "single",
+  "timing_regime": "cold_process",
   "ocr": false,
   "fixture_id": "sample_doc_1",
   "file_type": "pdf",
@@ -377,6 +379,17 @@ disappearance).
   physically impossible value, since ascending sort put `0.0` first) and recorded in
   `unranked_frameworks` instead. The pre-existing smallest-positive-value `reference_cpu_seconds`
   logic for `relative` is unchanged for the frameworks that remain.
+- **`FrameworkModeAggregation.timing_regime` and `PerFixtureRow.timing_regime`**: identify whether
+  a measurement launches a fresh process (`cold_process`) or follows a discarded warmup in the
+  same retained process (`warm_in_process`). Warm in-process diagnostics remain in detailed output
+  but are excluded from competitive rankings and shared-corpus comparisons so unlike lifecycle
+  costs are never ranked together.
+- **`FrameworkCapabilities.resource_measurement_scope`**: `isolated_process` means RSS/CPU target
+  the framework process tree. `harness_process_latency_only` means an in-process adapter cannot
+  isolate those resources; raw RSS/CPU fields are zero placeholders and aggregate memory/CPU
+  percentiles have `sample_count: 0`. `unknown` is the fail-closed default when the field is
+  absent. Duration and throughput remain measured. Cold release artifacts require
+  `isolated_process` in provenance, raw results, and aggregate fixture rows.
 
 ## Migration from v2.7.0 to v2.8.0
 
@@ -625,10 +638,11 @@ which the harness normalises to aggregate key `xberg-markdown-baseline:batch`.
 ### Run provenance sidecar
 
 The `run` command writes `provenance.json` beside the backward-compatible `results.json` array.
-Schema version 2 records the Xberg repository commit/dirty bit, the ordered fixture descriptors
+Schema version 3 records the Xberg repository commit/dirty bit, the ordered fixture descriptors
 and document BLAKE3 digests, cohort manifest identity, adapter versions and executable digests,
 explicit model revision identities, timing configuration, fixed batch partitions, requested
-workers, framework-specific worker semantics, and the configured Xberg thread budget.
+workers, framework-specific worker semantics, the configured Xberg thread budget, and explicit
+timing-regime and resource-measurement-scope metadata.
 Local absolute paths are never serialized.
 
 Since v2.8.0, the `consolidate` command reads every `provenance.json` sidecar it finds alongside
@@ -645,6 +659,15 @@ value, it records the legacy `--max-concurrent` fallback passed to `xberg batch
 cap. `effective_workers` remains `null` because Xberg resolves effective document concurrency
 from the workload. Non-Xberg rows and automatic-budget single-file rows omit
 `configured_thread_budget`.
+
+#### Run provenance migration from schema 2 to schema 3
+
+- Added required measurement-contract identity through `FrameworkProvenance.timing_regime` and
+  `FrameworkProvenance.resource_measurement_scope`.
+- Missing fields still deserialize as `unknown` for diagnostics, but schema-2 sidecars are rejected
+  by release validation rather than being interpreted as cold, isolated-process measurements.
+- Release artifacts require schema 3 with `cold_process` and `isolated_process`; warm in-process
+  diagnostics remain unranked and are not release-contract inputs.
 
 #### Run provenance migration from schema 1 to schema 2
 

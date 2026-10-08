@@ -507,6 +507,14 @@ pub struct QualityMetrics {
 /// enabling proper analysis and comparison of results based on framework features.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FrameworkCapabilities {
+    /// Process lifecycle represented by the performance measurement. ~keep
+    #[serde(default = "unknown_timing_regime")]
+    pub timing_regime: TimingRegime,
+
+    /// Process boundary covered by resource metrics. ~keep
+    #[serde(default = "unknown_resource_measurement_scope")]
+    pub resource_measurement_scope: ResourceMeasurementScope,
+
     /// Extensions this framework supports (e.g., ["pdf", "docx"])
     #[serde(default)]
     pub supported_extensions: Vec<String>,
@@ -549,6 +557,42 @@ pub struct FrameworkCapabilities {
     /// Disk installation size (if known)
     #[serde(default)]
     pub installation_size: Option<DiskSizeInfo>,
+}
+
+/// Process lifecycle represented by a benchmark result. ~keep
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TimingRegime {
+    /// A fresh process is launched for each measured invocation.
+    ColdProcess,
+    /// Warmup and measurement execute in the same retained process.
+    WarmInProcess,
+    /// Aggregate-only marker for a malformed bucket that pooled unlike lifecycles.
+    Mixed,
+    /// Lifecycle metadata was absent or could not be established.
+    #[default]
+    Unknown,
+}
+
+pub(crate) const fn unknown_timing_regime() -> TimingRegime {
+    TimingRegime::Unknown
+}
+
+/// Process boundary covered by memory and CPU measurements. ~keep
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceMeasurementScope {
+    /// Metrics target the isolated framework process tree.
+    IsolatedProcess,
+    /// Extraction runs inside the long-lived harness; absolute RSS/CPU are unavailable.
+    HarnessProcessLatencyOnly,
+    /// Resource measurement boundary was absent or could not be established. ~keep
+    #[default]
+    Unknown,
+}
+
+pub(crate) const fn unknown_resource_measurement_scope() -> ResourceMeasurementScope {
+    ResourceMeasurementScope::Unknown
 }
 
 /// Concrete framework API used for a batch benchmark.
@@ -683,6 +727,16 @@ pub struct DurationStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_framework_capabilities_fail_closed() {
+        let capabilities = FrameworkCapabilities::default();
+        assert_eq!(capabilities.timing_regime, TimingRegime::Unknown);
+        assert_eq!(
+            capabilities.resource_measurement_scope,
+            ResourceMeasurementScope::Unknown
+        );
+    }
 
     #[test]
     fn legacy_paddle_pipeline_parses_supported_spellings() {

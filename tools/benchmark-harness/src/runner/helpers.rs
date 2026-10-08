@@ -11,6 +11,44 @@ use std::time::Duration;
 
 use super::{BatchBenchmarkEntry, DiskSizeInfo};
 
+pub(super) fn validate_timing_regime_contract(
+    regimes: impl IntoIterator<Item = crate::types::TimingRegime>,
+    warmup_iterations: usize,
+) -> Result<()> {
+    let regimes: Vec<_> = regimes.into_iter().collect();
+    if regimes.iter().any(|regime| {
+        matches!(
+            regime,
+            crate::types::TimingRegime::Mixed | crate::types::TimingRegime::Unknown
+        )
+    }) {
+        return Err(Error::Config(
+            "mixed/unknown timing regimes cannot be emitted by an adapter".to_string(),
+        ));
+    }
+    if warmup_iterations == 0 && regimes.contains(&crate::types::TimingRegime::WarmInProcess) {
+        return Err(Error::Config(
+            "warm_in_process benchmarks require at least one discarded same-process warmup iteration".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_measured_iteration_count(
+    framework: &str,
+    expected: usize,
+    actual: usize,
+    timed_out: bool,
+) -> Result<()> {
+    let invalid = actual > expected || actual == 0 || (!timed_out && actual != expected);
+    if invalid {
+        return Err(Error::Benchmark(format!(
+            "framework '{framework}' produced {actual} measured iteration result(s), expected {expected}"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn effective_batch_warmup_iterations(capability: BatchCapability, configured: usize) -> usize {
     if capability.timing_scope == BatchTimingScope::ColdEndToEndSubprocess {
         0

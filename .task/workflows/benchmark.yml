@@ -54,6 +54,25 @@ tasks:
     cmds:
       - scripts/benchmarks/run-benchmark.sh
 
+  steady:
+    desc: "Run an opt-in Xberg baseline/layout warm in-process diagnostic"
+    vars:
+      PIPELINE: '{{ .PIPELINE | default "layout" }}'
+      OUTPUT_FORMAT: '{{ .OUTPUT_FORMAT | default "markdown" }}'
+    preconditions:
+      - sh: 'test "{{.PIPELINE}}" = "baseline" || test "{{.PIPELINE}}" = "layout"'
+        msg: "PIPELINE must be baseline or layout"
+    cmds:
+      - task: run
+        vars:
+          FRAMEWORK: 'xberg-{{.OUTPUT_FORMAT}}-{{.PIPELINE}}-steady-state'
+          MODE: single-file
+          ITERATIONS: '{{ .ITERATIONS | default "3" }}'
+          OUTPUT_FORMAT: '{{.OUTPUT_FORMAT}}'
+          MEASURE_QUALITY: '{{ .MEASURE_QUALITY | default "true" }}'
+          OCR_ENABLED: '{{ .OCR_ENABLED | default "false" }}'
+          COHORT: '{{ .COHORT | default "" }}'
+
   profile:
     desc: "Run pipeline-benchmark with flamegraph profiling. Builds with --profile profiling so Rust symbols are resolved."
     vars:

@@ -89,6 +89,10 @@ fn collect_performance_value_vectors(
 
     let memories: Vec<f64> = performance_samples
         .iter()
+        .filter(|r| {
+            r.framework_capabilities.resource_measurement_scope
+                == crate::types::ResourceMeasurementScope::IsolatedProcess
+        })
         .map(|r| r.metrics.peak_memory_bytes as f64 / 1_000_000.0)
         .filter(|&v| !v.is_nan() && v.is_finite())
         .collect();
@@ -107,6 +111,10 @@ fn collect_performance_value_vectors(
     // `unranked_frameworks` bookkeeping for the ranking-level exclusion). (Defect S2) ~keep
     let cpu_seconds_values: Vec<f64> = performance_samples
         .iter()
+        .filter(|r| {
+            r.framework_capabilities.resource_measurement_scope
+                == crate::types::ResourceMeasurementScope::IsolatedProcess
+        })
         .map(|r| r.metrics.cpu_seconds)
         .filter(|&v| !v.is_nan() && v.is_finite() && v > 0.0)
         .collect();

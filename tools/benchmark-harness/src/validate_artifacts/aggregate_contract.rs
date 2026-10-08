@@ -239,9 +239,17 @@ fn validate_record_settings(
                     declared_ocr_language_policy(&entry.framework)
                         .batch_partition_count(&eligible_languages, contract.batch_size)
                 })
-            && framework.ocr_language_policy == declared_ocr_language_policy(&entry.framework),
+            && framework.ocr_language_policy == declared_ocr_language_policy(&entry.framework)
+            && framework.timing_regime == crate::types::TimingRegime::ColdProcess,
         format!(
             "{}: aggregate provenance settings mismatch for {cell}",
+            context.path.display()
+        ),
+    )?;
+    require(
+        framework.resource_measurement_scope == crate::types::ResourceMeasurementScope::IsolatedProcess,
+        format!(
+            "{}: aggregate provenance resource measurement scope mismatch for {cell}",
             context.path.display()
         ),
     )
@@ -663,6 +671,10 @@ fn validate_aggregate_groups(
     for (key, group) in &aggregate.by_framework_mode {
         let entry = allowed_entries[key];
         require(
+            group.timing_regime == crate::types::TimingRegime::ColdProcess,
+            format!("{}: group {key} timing regime mismatch", context.path.display()),
+        )?;
+        require(
             !group.by_file_type.is_empty(),
             format!("{}: group {key} has no file-type metrics", context.path.display()),
         )?;
@@ -720,6 +732,16 @@ fn validate_one_aggregate_row(
     let entry = allowed_entries
         .get(&key)
         .ok_or_else(|| contract_error(format!("{}: row has no matching aggregate key", path.display())))?;
+    require(
+        row.timing_regime == crate::types::TimingRegime::ColdProcess
+            && row.framework_capabilities.timing_regime == row.timing_regime,
+        format!("{}: fixture row timing regime mismatch", path.display()),
+    )?;
+    require(
+        row.framework_capabilities.resource_measurement_scope
+            == crate::types::ResourceMeasurementScope::IsolatedProcess,
+        format!("{}: fixture row resource measurement scope mismatch", path.display()),
+    )?;
     let fixture_index = contract
         .document_stems
         .iter()

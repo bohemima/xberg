@@ -14,7 +14,7 @@ use crate::fixture::FixtureManager;
 use crate::types::{BatchCapability, BatchEntryPoint, OutputFormat};
 use crate::{CohortManifest, Error, Result};
 
-const PROVENANCE_SCHEMA_VERSION: u32 = 2;
+const PROVENANCE_SCHEMA_VERSION: u32 = 3;
 
 /// A path-free executable identity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,6 +98,12 @@ pub struct CorpusProvenance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrameworkProvenance {
     pub name: String,
+    /// Process lifecycle represented by this framework's measured invocations. ~keep
+    #[serde(default = "crate::types::unknown_timing_regime")]
+    pub timing_regime: crate::types::TimingRegime,
+    /// Process boundary represented by resource measurements. ~keep
+    #[serde(default = "crate::types::unknown_resource_measurement_scope")]
+    pub resource_measurement_scope: crate::types::ResourceMeasurementScope,
     pub version: String,
     pub executable: Option<ExecutableProvenance>,
     pub models: Vec<String>,
@@ -262,6 +268,8 @@ fn capture_framework(
     (
         FrameworkProvenance {
             name: adapter.name().to_string(),
+            timing_regime: adapter.timing_regime(),
+            resource_measurement_scope: adapter.resource_measurement_scope(),
             version: adapter.version(),
             executable,
             models: models.get(adapter.name()).cloned().unwrap_or_default(),
@@ -894,6 +902,25 @@ mod tests {
             configured_thread_budget(BenchmarkMode::SingleFile, None, &automatic),
             None
         );
+    }
+
+    #[test]
+    fn steady_native_provenance_uses_embedded_thread_budget_and_build_identity() {
+        use crate::adapters::native::NativeAdapter;
+
+        let mut extraction = xberg::ExtractionConfig::default();
+        extraction.concurrency.get_or_insert_with(Default::default).max_threads = Some(3);
+        let adapter = NativeAdapter::with_config(extraction);
+
+        assert_eq!(
+            configured_thread_budget(BenchmarkMode::SingleFile, None, &adapter),
+            Some(3)
+        );
+        assert_eq!(
+            adapter.executable_build_identity().unwrap().build_id,
+            xberg::embedded_build_id()
+        );
+        assert!(adapter.executable_provenance().unwrap().blake3.is_some());
     }
 
     #[test]

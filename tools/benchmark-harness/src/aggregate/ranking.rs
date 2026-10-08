@@ -601,6 +601,12 @@ pub(super) fn build_comparison(
     by_framework_mode: &HashMap<String, FrameworkModeAggregation>,
     cohort: Option<crate::bench_matrix::Cohort>,
 ) -> ComparisonData {
+    let competitive: HashMap<String, FrameworkModeAggregation> = by_framework_mode
+        .iter()
+        .filter(|(_, aggregation)| aggregation.timing_regime == crate::types::TimingRegime::ColdProcess)
+        .map(|(key, aggregation)| (key.clone(), aggregation.clone()))
+        .collect();
+    let by_framework_mode = &competitive;
     let optional_keys = optional_aggregate_keys(cohort);
     let collected = collect_comparison_metrics(by_framework_mode);
 

@@ -71,6 +71,8 @@ fn successful_result() -> BenchmarkResult {
         cold_start_duration: Some(Duration::from_millis(210)),
         file_extension: "pdf".to_string(),
         framework_capabilities: FrameworkCapabilities {
+            timing_regime: benchmark_harness::types::TimingRegime::ColdProcess,
+            resource_measurement_scope: benchmark_harness::types::ResourceMeasurementScope::IsolatedProcess,
             supported_extensions: vec!["pdf".to_string(), "docx".to_string()],
             ocr_support: true,
             batch_support: true,
@@ -118,7 +120,7 @@ fn failed_result() -> BenchmarkResult {
 
 fn sample_provenance() -> RunProvenance {
     RunProvenance {
-        schema_version: 2,
+        schema_version: 3,
         harness_version: "1.0.0-rc.41".to_string(),
         repository: RepositoryProvenance {
             commit: Some("ea739f5ed845a8f787af203e1f8f7b1f3e0a436e".to_string()),
@@ -138,6 +140,8 @@ fn sample_provenance() -> RunProvenance {
         },
         frameworks: vec![FrameworkProvenance {
             name: "framework-x".to_string(),
+            timing_regime: benchmark_harness::types::TimingRegime::ColdProcess,
+            resource_measurement_scope: benchmark_harness::types::ResourceMeasurementScope::IsolatedProcess,
             version: "9.9.9".to_string(),
             executable: Some(ExecutableProvenance {
                 name: "framework-x-cli".to_string(),

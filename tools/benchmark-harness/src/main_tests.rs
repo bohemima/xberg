@@ -363,7 +363,7 @@ fn coverage_records_but_does_not_abort_on_only_infrastructure_failures() {
 /// full benchmark run.
 fn sample_provenance() -> RunProvenance {
     RunProvenance {
-        schema_version: 2,
+        schema_version: 3,
         harness_version: "test".to_string(),
         repository: RepositoryProvenance {
             commit: Some("0".repeat(40)),
@@ -375,6 +375,8 @@ fn sample_provenance() -> RunProvenance {
             ordered_fixtures: vec![],
         },
         frameworks: vec![FrameworkProvenance {
+            timing_regime: benchmark_harness::types::TimingRegime::ColdProcess,
+            resource_measurement_scope: benchmark_harness::types::ResourceMeasurementScope::IsolatedProcess,
             name: "healthy".to_string(),
             version: "1.0.0".to_string(),
             executable: None,

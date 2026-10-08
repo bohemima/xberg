@@ -60,6 +60,10 @@ async fn genuinely_empty_result_keeps_empty_content_and_is_not_reclassified() {
             "empty-content-adapter"
         }
 
+        fn timing_regime(&self) -> crate::types::TimingRegime {
+            crate::types::TimingRegime::ColdProcess
+        }
+
         fn supports_format(&self, file_type: &str) -> bool {
             file_type == "pdf"
         }

@@ -616,6 +616,8 @@ impl SubprocessAdapter {
 
     fn build_batch_framework_capabilities(&self, batch_sample_id: String) -> FrameworkCapabilities {
         FrameworkCapabilities {
+            timing_regime: crate::types::TimingRegime::ColdProcess,
+            resource_measurement_scope: crate::types::ResourceMeasurementScope::IsolatedProcess,
             supported_extensions: self.supported_formats.clone(),
             ocr_support: Self::framework_supports_ocr(&self.name),
             batch_support: self.batch_capability.is_some(),

@@ -6,6 +6,82 @@ use crate::system_load::SystemLoad;
 use crate::types::{OcrStatus, PdfMetadata, QualityMetrics};
 
 #[test]
+fn warm_in_process_results_are_reported_but_excluded_from_cold_rankings() {
+    let cold = create_test_result("competitor", "pdf", OcrStatus::NotUsed, 1_000, 1_000_000.0, 10_000_000);
+    let mut warm = create_test_result(
+        "xberg-markdown-layout-steady-state",
+        "pdf",
+        OcrStatus::NotUsed,
+        100,
+        10_000_000.0,
+        20_000_000,
+    );
+    warm.framework_capabilities.timing_regime = crate::types::TimingRegime::WarmInProcess;
+    warm.framework_capabilities.resource_measurement_scope =
+        crate::types::ResourceMeasurementScope::HarnessProcessLatencyOnly;
+
+    let aggregated = aggregate_new_format(&[cold, warm]);
+
+    assert!(
+        aggregated
+            .by_framework_mode
+            .values()
+            .any(|entry| entry.timing_regime == crate::types::TimingRegime::WarmInProcess)
+    );
+    assert!(
+        aggregated
+            .comparison
+            .throughput_ranking
+            .iter()
+            .all(|entry| !entry.framework_mode.contains("steady-state"))
+    );
+    let steady = aggregated
+        .by_framework_mode
+        .values()
+        .find(|entry| entry.timing_regime == crate::types::TimingRegime::WarmInProcess)
+        .unwrap();
+    let performance = steady.overall_performance.as_ref().unwrap();
+    assert_eq!(performance.memory.sample_count, 0);
+    assert_eq!(performance.cpu_seconds.sample_count, 0);
+}
+
+#[test]
+fn default_capabilities_are_unknown_and_unranked() {
+    let mut result = create_test_result(
+        "unknown-default",
+        "pdf",
+        OcrStatus::NotUsed,
+        100,
+        1_000_000.0,
+        1_000_000,
+    );
+    result.framework_capabilities = crate::types::FrameworkCapabilities::default();
+
+    let aggregated = aggregate_new_format(&[result]);
+
+    assert_eq!(
+        aggregated.by_framework_mode.values().next().unwrap().timing_regime,
+        crate::types::TimingRegime::Unknown
+    );
+    assert!(aggregated.comparison.throughput_ranking.is_empty());
+    assert!(aggregated.comparison.memory_ranking.is_empty());
+}
+
+#[test]
+fn mixed_regimes_under_one_framework_name_fail_closed_out_of_rankings() {
+    let cold = create_test_result("same-name", "pdf", OcrStatus::NotUsed, 1_000, 1_000_000.0, 10_000_000);
+    let mut warm = cold.clone();
+    warm.file_path = std::path::PathBuf::from("second.pdf");
+    warm.framework_capabilities.timing_regime = crate::types::TimingRegime::WarmInProcess;
+
+    let aggregated = aggregate_new_format(&[cold, warm]);
+    let group = aggregated.by_framework_mode.values().next().unwrap();
+
+    assert_eq!(group.timing_regime, crate::types::TimingRegime::Mixed);
+    assert!(aggregated.comparison.throughput_ranking.is_empty());
+}
+
+#[test]
 fn comparison_order_is_deterministic_when_metrics_tie() {
     let docling = create_test_result("docling", "pdf", OcrStatus::NotUsed, 1_000, 1_000_000.0, 10_000_000);
     let tika = create_test_result("tika", "pdf", OcrStatus::NotUsed, 1_000, 1_000_000.0, 10_000_000);

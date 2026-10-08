@@ -2,7 +2,7 @@ use benchmark_harness::aggregate::aggregate_new_format;
 use benchmark_harness::system_load::SystemLoad;
 use benchmark_harness::types::{
     BenchmarkResult, ErrorKind, FrameworkCapabilities, OcrStatus, OutputFormat, PdfMetadata, PerformanceMetrics,
-    QualityMetrics,
+    QualityMetrics, ResourceMeasurementScope, TimingRegime,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -46,7 +46,11 @@ fn make_benchmark_result(
         statistics: None,
         cold_start_duration: Some(Duration::from_millis(500)),
         file_extension: "pdf".to_string(),
-        framework_capabilities: FrameworkCapabilities::default(),
+        framework_capabilities: FrameworkCapabilities {
+            timing_regime: TimingRegime::ColdProcess,
+            resource_measurement_scope: ResourceMeasurementScope::IsolatedProcess,
+            ..FrameworkCapabilities::default()
+        },
         pdf_metadata: None,
         ocr_status: if ocr { OcrStatus::Used } else { OcrStatus::NotUsed },
         extracted_text: None,
@@ -55,7 +59,7 @@ fn make_benchmark_result(
 }
 
 #[test]
-fn test_schema_version_2_8_0() {
+fn test_schema_version_2_10_0() {
     let results = vec![make_benchmark_result(
         "xberg-markdown-baseline",
         OutputFormat::Markdown,
@@ -75,7 +79,7 @@ fn test_schema_version_2_8_0() {
     )];
 
     let aggregated = aggregate_new_format(&results);
-    assert_eq!(aggregated.schema_version, "2.9.0");
+    assert_eq!(aggregated.schema_version, "2.10.0");
 }
 
 #[test]
@@ -524,7 +528,7 @@ fn test_empty_results() {
     let results = vec![];
     let aggregated = aggregate_new_format(&results);
 
-    assert_eq!(aggregated.schema_version, "2.9.0");
+    assert_eq!(aggregated.schema_version, "2.10.0");
     assert!(aggregated.by_framework_mode.is_empty());
     assert!(aggregated.per_fixture_results.is_empty());
     assert_eq!(aggregated.metadata.total_results, 0);

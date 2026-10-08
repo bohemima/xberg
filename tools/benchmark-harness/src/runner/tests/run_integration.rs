@@ -16,6 +16,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+fn write_pdf_fixtures(root: &std::path::Path, count: usize, framework: &str) {
+    for index in 0..count {
+        let document_name = format!("document-{index}.pdf");
+        std::fs::write(root.join(&document_name), b"pdf").unwrap();
+        let fixture = Fixture {
+            document: PathBuf::from(&document_name),
+            file_type: "pdf".to_string(),
+            file_size: 3,
+            expected_frameworks: vec![framework.to_string()],
+            metadata: HashMap::new(),
+            ground_truth: None,
+        };
+        std::fs::write(
+            root.join(format!("fixture-{index}.json")),
+            serde_json::to_string(&fixture).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn test_run_with_no_frameworks() {
     let config = BenchmarkConfig::default();
@@ -167,6 +187,90 @@ async fn non_fatal_warmup_failure_completes_run_with_no_cold_start_sample() {
         results[0].cold_start_duration, None,
         "the recorded result must not carry a fabricated or borrowed cold-start duration"
     );
+}
+
+#[tokio::test]
+async fn cold_start_sample_is_attached_to_exactly_one_result() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    write_pdf_fixtures(temp_dir.path(), 2, "scripted-text");
+
+    let mut registry = AdapterRegistry::new();
+    registry
+        .register(Arc::new(super::support::ScriptedTextAdapter { text: "ok".to_string() }))
+        .unwrap();
+    let config = BenchmarkConfig {
+        benchmark_mode: BenchmarkMode::SingleFile,
+        warmup_iterations: 0,
+        benchmark_iterations: 1,
+        ..Default::default()
+    };
+    let mut runner = BenchmarkRunner::new(config, registry);
+    runner.load_fixtures(&temp_dir.path().to_path_buf()).unwrap();
+
+    let results = runner.run(&["scripted-text".to_string()]).await.unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.cold_start_duration.is_some())
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn warm_adapter_lifecycle_accounts_for_probe_discarded_warmup_and_measurement() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    write_pdf_fixtures(temp_dir.path(), 1, "stateful-warm");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = AdapterRegistry::new();
+    registry
+        .register(Arc::new(super::support::StatefulWarmAdapter {
+            calls: Arc::clone(&calls),
+            timeout_on_call: None,
+        }))
+        .unwrap();
+    let config = BenchmarkConfig {
+        benchmark_mode: BenchmarkMode::SingleFile,
+        warmup_iterations: 1,
+        benchmark_iterations: 1,
+        ..Default::default()
+    };
+    let mut runner = BenchmarkRunner::new(config, registry);
+    runner.load_fixtures(&temp_dir.path().to_path_buf()).unwrap();
+
+    let results = runner.run(&["stateful-warm".to_string()]).await.unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(results[0].extracted_text.as_deref(), Some("call-3"));
+}
+
+#[tokio::test]
+async fn warm_adapter_timeout_aborts_before_later_fixture_starts() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    write_pdf_fixtures(temp_dir.path(), 2, "stateful-warm");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = AdapterRegistry::new();
+    registry
+        .register(Arc::new(super::support::StatefulWarmAdapter {
+            calls: Arc::clone(&calls),
+            timeout_on_call: Some(3),
+        }))
+        .unwrap();
+    let config = BenchmarkConfig {
+        benchmark_mode: BenchmarkMode::SingleFile,
+        warmup_iterations: 1,
+        benchmark_iterations: 1,
+        ..Default::default()
+    };
+    let mut runner = BenchmarkRunner::new(config, registry);
+    runner.load_fixtures(&temp_dir.path().to_path_buf()).unwrap();
+
+    let error = runner.run(&["stateful-warm".to_string()]).await.unwrap_err();
+
+    assert!(error.to_string().contains("same-process measurement"));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]

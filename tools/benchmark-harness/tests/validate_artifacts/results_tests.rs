@@ -27,6 +27,16 @@ fn accepts_exact_raw_contract_for_every_format_cohort() {
 }
 
 #[test]
+fn rejects_provenance_schema_2_without_required_measurement_contract() {
+    let scenario = artifact_scenario(Cohort::Native);
+    tamper_json(&provenance_path(&scenario, 0), |value| {
+        value["schema_version"] = serde_json::json!(2);
+    });
+
+    assert_err_contains(validate(&scenario.args), "unexpected provenance schema");
+}
+
+#[test]
 fn rejects_every_invalid_raw_quality_metric_with_path_and_index_context() {
     for (field, value) in [
         ("f1_score_text", serde_json::json!(-0.01)),
@@ -129,6 +139,90 @@ fn rejects_batch_xberg_framework_with_wrong_base() {
         value["frameworks"][0]["name"] = serde_json::json!("xberg-markdown-bogus-batch");
     });
     assert_err_contains(validate(&scenario.args), "framework mismatch");
+}
+
+#[test]
+fn rejects_warm_timing_regime_in_cold_release_provenance() {
+    let scenario = artifact_scenario(Cohort::Native);
+    tamper_json(&provenance_path(&scenario, 0), |value| {
+        value["frameworks"][0]["timing_regime"] = serde_json::json!("warm_in_process");
+    });
+    assert_err_contains(validate(&scenario.args), "timing regime mismatch");
+}
+
+#[test]
+fn rejects_result_timing_regime_that_disagrees_with_cold_release_contract() {
+    let scenario = artifact_scenario(Cohort::Native);
+    tamper_json(&results_path(&scenario, 0), |value| {
+        value[0]["framework_capabilities"]["timing_regime"] = serde_json::json!("warm_in_process");
+    });
+    assert_err_contains(validate(&scenario.args), "result 0 timing regime mismatch");
+}
+
+#[test]
+fn rejects_missing_timing_regime_in_release_provenance_and_results() {
+    for target_provenance in [true, false] {
+        let scenario = artifact_scenario(Cohort::Native);
+        let path = if target_provenance {
+            provenance_path(&scenario, 0)
+        } else {
+            results_path(&scenario, 0)
+        };
+        tamper_json(&path, |value| {
+            let object = if target_provenance {
+                value["frameworks"][0].as_object_mut().unwrap()
+            } else {
+                value[0]["framework_capabilities"].as_object_mut().unwrap()
+            };
+            object.remove("timing_regime");
+        });
+
+        assert_err_contains(validate(&scenario.args), "timing regime mismatch");
+    }
+}
+
+#[test]
+fn rejects_non_isolated_resource_scope_in_release_provenance_and_results() {
+    for target_provenance in [true, false] {
+        let scenario = artifact_scenario(Cohort::Native);
+        let path = if target_provenance {
+            provenance_path(&scenario, 0)
+        } else {
+            results_path(&scenario, 0)
+        };
+        tamper_json(&path, |value| {
+            let object = if target_provenance {
+                &mut value["frameworks"][0]
+            } else {
+                &mut value[0]["framework_capabilities"]
+            };
+            object["resource_measurement_scope"] = serde_json::json!("harness_process_latency_only");
+        });
+
+        assert_err_contains(validate(&scenario.args), "resource measurement scope mismatch");
+    }
+}
+
+#[test]
+fn rejects_missing_resource_scope_in_release_provenance_and_results() {
+    for target_provenance in [true, false] {
+        let scenario = artifact_scenario(Cohort::Native);
+        let path = if target_provenance {
+            provenance_path(&scenario, 0)
+        } else {
+            results_path(&scenario, 0)
+        };
+        tamper_json(&path, |value| {
+            let object = if target_provenance {
+                value["frameworks"][0].as_object_mut().unwrap()
+            } else {
+                value[0]["framework_capabilities"].as_object_mut().unwrap()
+            };
+            object.remove("resource_measurement_scope");
+        });
+
+        assert_err_contains(validate(&scenario.args), "resource measurement scope mismatch");
+    }
 }
 
 #[test]

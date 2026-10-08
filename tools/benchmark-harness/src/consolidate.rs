@@ -388,7 +388,7 @@ mod tests {
         use crate::provenance::{CorpusProvenance, RepositoryProvenance, TimingProvenance};
 
         RunProvenance {
-            schema_version: 2,
+            schema_version: 3,
             harness_version: "test".to_string(),
             repository: RepositoryProvenance {
                 commit: Some(commit.to_string()),

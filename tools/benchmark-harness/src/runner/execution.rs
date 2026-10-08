@@ -15,7 +15,7 @@ use std::time::Duration;
 use super::BenchmarkRunner;
 use super::helpers::{
     aggregate_metrics, average_durations, calculate_amplified_iterations, calculate_statistics,
-    effective_batch_warmup_iterations,
+    effective_batch_warmup_iterations, ensure_measured_iteration_count,
 };
 
 #[cfg(feature = "profiling")]
@@ -221,8 +221,24 @@ async fn run_warmup_iterations(context: &ExtractionContext<'_>) -> Result<bool> 
     for _iteration in warmup_start..config.warmup_iterations {
         let result = context.extract_once().await?;
         if result.error_kind == ErrorKind::Timeout {
+            if context.adapter.timing_regime() == crate::types::TimingRegime::WarmInProcess {
+                return Err(Error::Benchmark(format!(
+                    "same-process warmup for '{}' timed out; aborting to prevent abandoned work from contaminating later samples",
+                    context.adapter.name()
+                )));
+            }
             warmup_timed_out = true;
             break;
+        }
+        if context.adapter.timing_regime() == crate::types::TimingRegime::WarmInProcess && !result.success {
+            return Err(Error::Benchmark(format!(
+                "same-process warmup for '{}' failed: {}",
+                context.adapter.name(),
+                result
+                    .error_message
+                    .as_deref()
+                    .unwrap_or("framework returned success=false")
+            )));
         }
         drop(result);
     }
@@ -576,6 +592,19 @@ impl BenchmarkRunner {
         };
 
         let all_results = run_measured_iterations(&context, amplification_factor, warmup_timed_out).await?;
+        let timed_out = all_results.iter().any(|result| result.error_kind == ErrorKind::Timeout);
+        if timed_out && adapter.timing_regime() == crate::types::TimingRegime::WarmInProcess {
+            return Err(Error::Benchmark(format!(
+                "same-process measurement for '{}' timed out; aborting to prevent abandoned work from contaminating later samples",
+                adapter.name()
+            )));
+        }
+        let expected_results = if warmup_timed_out {
+            1
+        } else {
+            config.benchmark_iterations * amplification_factor
+        };
+        ensure_measured_iteration_count(adapter.name(), expected_results, all_results.len(), timed_out)?;
 
         #[cfg(feature = "profiling")]
         finish_profiling(profiler, &adapter, config, file_path);
