@@ -309,13 +309,29 @@ fn preferred_ocr_elements(
         .iter()
         .filter(|element| !element.text.trim().is_empty())
         .collect::<Vec<_>>();
-    let selected_level = if meaningful.iter().any(|element| element.level == preferred_level) {
-        Some(preferred_level)
-    } else if meaningful.iter().any(|element| element.level == fallback_level) {
-        Some(fallback_level)
-    } else {
-        None
-    };
+    let (line_count, vertical_line_count) = meaningful
+        .iter()
+        .filter(|element| element.level == crate::types::OcrElementLevel::Line)
+        .fold((0usize, 0usize), |(line_count, vertical_count), element| {
+            let (_, _, width, height) = ocr_geometry_bounds(&element.geometry);
+            (
+                line_count + 1,
+                vertical_count + usize::from(u64::from(height) > u64::from(width) * 2),
+            )
+        });
+    let preferred_lines_are_vertical = preferred_level == crate::types::OcrElementLevel::Line
+        && line_count > 0
+        && vertical_line_count * 2 >= line_count;
+    let selected_level =
+        if preferred_lines_are_vertical && meaningful.iter().any(|element| element.level == fallback_level) {
+            Some(fallback_level)
+        } else if meaningful.iter().any(|element| element.level == preferred_level) {
+            Some(preferred_level)
+        } else if meaningful.iter().any(|element| element.level == fallback_level) {
+            Some(fallback_level)
+        } else {
+            None
+        };
 
     meaningful
         .into_iter()
@@ -3819,6 +3835,38 @@ mod tests {
             preferred_ocr_elements(&words, crate::types::OcrElementLevel::Line)[0].level,
             crate::types::OcrElementLevel::Word
         );
+    }
+
+    #[cfg(all(feature = "layout-detection", feature = "ocr"))]
+    #[test]
+    fn should_use_word_geometry_when_tesseract_lines_are_vertical_columns() {
+        let elements = vec![
+            positioned_line_box("vertical column", 120, 10, 20, 140),
+            positioned_word_box("vertical", 120, 10, 20, 50),
+            positioned_word_box("column", 120, 70, 20, 50),
+        ];
+
+        let selected = preferred_ocr_elements(&elements, crate::types::OcrElementLevel::Line);
+
+        assert_eq!(
+            selected.iter().map(|element| element.level).collect::<Vec<_>>(),
+            [crate::types::OcrElementLevel::Word, crate::types::OcrElementLevel::Word]
+        );
+    }
+
+    #[cfg(all(feature = "layout-detection", feature = "ocr"))]
+    #[test]
+    fn should_keep_tesseract_lines_when_their_geometry_is_horizontal() {
+        let elements = vec![
+            positioned_line_box("horizontal line", 10, 20, 140, 20),
+            positioned_word_box("horizontal", 10, 20, 70, 20),
+            positioned_word_box("line", 90, 20, 40, 20),
+        ];
+
+        let selected = preferred_ocr_elements(&elements, crate::types::OcrElementLevel::Line);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].level, crate::types::OcrElementLevel::Line);
     }
 
     #[cfg(all(feature = "layout-detection", feature = "ocr"))]
