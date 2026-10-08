@@ -109,6 +109,9 @@ impl FrameworkAdapter for SubprocessAdapter {
             &args,
         ))
     }
+    fn executable_build_identity(&self) -> Option<crate::adapter::ExecutableBuildIdentity> {
+        self.executable_build_identity.clone()
+    }
     fn worker_provenance(&self, requested: usize) -> (Option<usize>, Option<usize>) {
         match self.batch_capability.map(|capability| capability.entry_point) {
             Some(crate::types::BatchEntryPoint::DoclingJobkit) => (None, None),

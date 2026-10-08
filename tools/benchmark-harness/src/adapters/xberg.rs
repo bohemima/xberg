@@ -9,7 +9,7 @@
 //!   images yet)
 
 use crate::{
-    adapter::declared_ocr_language_policy,
+    adapter::{ExecutableBuildIdentity, declared_ocr_language_policy},
     adapters::subprocess::SubprocessAdapter,
     error::Result,
     types::{BatchCapability, BatchEntryPoint, BatchTimingScope, OutputFormat, XbergPdfBackend, XbergPipeline},
@@ -196,6 +196,11 @@ pub fn create_xberg_adapter(
     }
 
     let cli_path = locate_xberg_cli()?;
+    let build_id = probe_xberg_build_id(&cli_path)?;
+    let build_identity = ExecutableBuildIdentity {
+        build_id,
+        path: cli_path.clone(),
+    };
 
     let content_format = match output_format {
         OutputFormat::Markdown => "markdown",
@@ -244,12 +249,50 @@ pub fn create_xberg_adapter(
         SubprocessAdapter::new(&framework_name, cli_path, args, env, supported_formats)
     }
     .with_supported_output_formats(vec![output_format])
-    .with_ocr_language_policy(declared_ocr_language_policy(&framework_name));
+    .with_ocr_language_policy(declared_ocr_language_policy(&framework_name))
+    .with_executable_build_identity(build_identity);
     if let Some(single_args) = single_file_args {
         adapter = adapter.with_single_file_args(single_args);
     }
 
     Ok(adapter)
+}
+
+fn probe_xberg_build_id(path: &Path) -> Result<String> {
+    let output = std::process::Command::new(path)
+        .args(["version", "--format", "json"])
+        .output()
+        .map_err(|error| {
+            crate::Error::Benchmark(format!(
+                "failed to query Xberg build identity from `{}`: {error}",
+                path.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(crate::Error::Benchmark(format!(
+            "Xberg build identity query failed for `{}` with status {}",
+            path.display(),
+            output.status
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        crate::Error::Benchmark(format!(
+            "Xberg build identity query returned invalid JSON for `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    value
+        .get("build_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|build_id| !build_id.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            crate::Error::Benchmark(format!(
+                "Xberg build identity query returned no build_id for `{}`",
+                path.display()
+            ))
+        })
 }
 
 /// Locates the xberg executable.
@@ -362,6 +405,40 @@ mod tests {
         }
 
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_executable_is_rejected_for_clean_checkout_build_id_mismatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("xberg");
+        std::fs::write(
+            &path,
+            b"#!/bin/sh\nprintf '%s\\n' '{\"name\":\"xberg-cli\",\"version\":\"1.3.7\",\"build_id\":\"2222222222222222222222222222222222222222\"}'\n",
+        )
+        .unwrap();
+        let mut permissions = path.metadata().unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let actual = probe_xberg_build_id(&path).unwrap();
+        assert_eq!(actual, "2222222222222222222222222222222222222222");
+
+        let repository = crate::provenance::RepositoryProvenance {
+            commit: Some("1111111111111111111111111111111111111111".to_string()),
+            dirty: Some(false),
+        };
+        let error =
+            crate::provenance::validate_xberg_build_identity(&repository, "xberg-markdown-baseline", &actual, &path)
+                .unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("build ID mismatch"));
+        assert!(message.contains("1111111111111111111111111111111111111111"));
+        assert!(message.contains("2222222222222222222222222222222222222222"));
+        assert!(message.contains(path.to_string_lossy().as_ref()));
     }
 
     #[test]

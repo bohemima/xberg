@@ -12,7 +12,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Canonicalize a Tesseract OCR language request into individual codes.
@@ -56,6 +56,12 @@ pub enum OcrLanguagePolicy {
     AnyBatchGlobal,
     /// Sceptre's supported script groups, configured independently per document.
     SceptrePerDocument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutableBuildIdentity {
+    pub build_id: String,
+    pub path: PathBuf,
 }
 
 impl OcrLanguagePolicy {
@@ -359,6 +365,10 @@ pub trait FrameworkAdapter: Send + Sync {
     /// Return the executable identity for the entry point used in the selected mode.
     fn executable_provenance_for_mode(&self, _mode: BenchmarkMode) -> Option<ExecutableProvenance> {
         self.executable_provenance()
+    }
+
+    fn executable_build_identity(&self) -> Option<ExecutableBuildIdentity> {
+        None
     }
 
     /// Requested and effective worker counts, when the adapter exposes a worker control.

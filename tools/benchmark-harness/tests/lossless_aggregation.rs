@@ -143,6 +143,7 @@ fn sample_provenance() -> RunProvenance {
                 name: "framework-x-cli".to_string(),
                 blake3: Some("a".repeat(64)),
                 invocation_blake3: "b".repeat(64),
+                build_id: None,
             }),
             models: vec!["org/model@rev#deadbeef".to_string()],
             batch_capability: Some(BatchCapability {

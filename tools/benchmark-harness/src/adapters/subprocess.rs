@@ -62,6 +62,7 @@ pub struct SubprocessAdapter {
     /// forwarded and parity is not assumed on its behalf.
     ocr_language_arg: Option<String>,
     ocr_language_policy: crate::adapter::OcrLanguagePolicy,
+    executable_build_identity: Option<crate::adapter::ExecutableBuildIdentity>,
 }
 
 impl SubprocessAdapter {
@@ -100,6 +101,7 @@ impl SubprocessAdapter {
             xberg_max_threads: None,
             ocr_language_arg: None,
             ocr_language_policy: crate::adapter::OcrLanguagePolicy::DefaultOnly,
+            executable_build_identity: None,
         }
     }
     /// Create a new subprocess adapter with batch support
@@ -141,6 +143,7 @@ impl SubprocessAdapter {
             xberg_max_threads: None,
             ocr_language_arg: None,
             ocr_language_policy: crate::adapter::OcrLanguagePolicy::DefaultOnly,
+            executable_build_identity: None,
         }
     }
     /// Set a maximum timeout for this adapter, overriding the global config timeout
@@ -187,6 +190,10 @@ impl SubprocessAdapter {
     }
     pub fn with_ocr_language_policy(mut self, policy: crate::adapter::OcrLanguagePolicy) -> Self {
         self.ocr_language_policy = policy;
+        self
+    }
+    pub(crate) fn with_executable_build_identity(mut self, identity: crate::adapter::ExecutableBuildIdentity) -> Self {
+        self.executable_build_identity = Some(identity);
         self
     }
     /// Set the bounded worker count used by native batch implementations.

@@ -109,6 +109,14 @@ use std::time::Instant;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use xberg::{OutputFormat as ContentOutputFormat, detect_mime_type};
 
+fn version_json() -> serde_json::Value {
+    json!({
+        "name": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "build_id": xberg::embedded_build_id(),
+    })
+}
+
 /// Xberg document intelligence CLI
 #[derive(Parser)]
 #[command(name = "xberg")]
@@ -923,10 +931,7 @@ fn main() -> Result<()> {
                     println!("{} {}", style::label(name), style::success(version));
                 }
                 WireFormat::Json => {
-                    let output = json!({
-                        "name": name,
-                        "version": version,
-                    });
+                    let output = version_json();
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&output)
@@ -1179,6 +1184,13 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod feature_profile_tests {
     use super::*;
+
+    #[test]
+    fn version_json_includes_embedded_build_id() {
+        let output = version_json();
+        assert_eq!(output["build_id"], xberg::embedded_build_id());
+        assert_eq!(output["version"], env!("CARGO_PKG_VERSION"));
+    }
 
     fn command_arg_ids(command: &str) -> Vec<String> {
         Cli::command()

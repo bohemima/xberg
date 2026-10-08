@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::{FrameworkAdapter, OcrLanguagePolicy};
+use crate::adapter::{ExecutableBuildIdentity, FrameworkAdapter, OcrLanguagePolicy};
 use crate::config::{BenchmarkConfig, BenchmarkMode};
 use crate::fixture::FixtureManager;
 use crate::types::{BatchCapability, BatchEntryPoint, OutputFormat};
@@ -24,6 +24,8 @@ pub struct ExecutableProvenance {
     pub blake3: Option<String>,
     /// Digest of command arguments and any argument that resolves to a file.
     pub invocation_blake3: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
 }
 
 impl ExecutableProvenance {
@@ -60,6 +62,7 @@ impl ExecutableProvenance {
                 .to_string(),
             blake3: resolved_command.as_deref().map(hash_file).transpose().ok().flatten(),
             invocation_blake3: invocation.finalize().to_hex().to_string(),
+            build_id: None,
         }
     }
 }
@@ -213,7 +216,7 @@ fn capture_framework(
     adapter: &Arc<dyn FrameworkAdapter>,
     inputs: &ProvenanceInputs<'_>,
     models: &HashMap<&str, Vec<String>>,
-) -> FrameworkProvenance {
+) -> (FrameworkProvenance, Option<ExecutableBuildIdentity>) {
     let capability = matches!(inputs.config.benchmark_mode, BenchmarkMode::Batch)
         .then(|| adapter.batch_capability())
         .flatten();
@@ -250,27 +253,36 @@ fn capture_framework(
     );
     let configured_thread_budget = configured_thread_budget(inputs.config.benchmark_mode, capability, adapter.as_ref());
 
-    FrameworkProvenance {
-        name: adapter.name().to_string(),
-        version: adapter.version(),
-        executable: adapter.executable_provenance_for_mode(inputs.config.benchmark_mode),
-        models: models.get(adapter.name()).cloned().unwrap_or_default(),
-        batch_capability: capability,
-        requested_workers,
-        effective_workers,
-        configured_thread_budget,
-        worker_semantics: worker_semantics(inputs.config.benchmark_mode, capability).to_string(),
-        effective_warmup_iterations: capability.map_or(inputs.config.warmup_iterations, |value| {
-            if value.timing_scope == crate::types::BatchTimingScope::ColdEndToEndSubprocess {
-                0
-            } else {
-                inputs.config.warmup_iterations
-            }
-        }),
-        eligible_documents,
-        batch_partitions,
-        ocr_language_policy: language_policy,
+    let build_identity = adapter.executable_build_identity();
+    let mut executable = adapter.executable_provenance_for_mode(inputs.config.benchmark_mode);
+    if let (Some(executable), Some(identity)) = (&mut executable, &build_identity) {
+        executable.build_id = Some(identity.build_id.clone());
     }
+
+    (
+        FrameworkProvenance {
+            name: adapter.name().to_string(),
+            version: adapter.version(),
+            executable,
+            models: models.get(adapter.name()).cloned().unwrap_or_default(),
+            batch_capability: capability,
+            requested_workers,
+            effective_workers,
+            configured_thread_budget,
+            worker_semantics: worker_semantics(inputs.config.benchmark_mode, capability).to_string(),
+            effective_warmup_iterations: capability.map_or(inputs.config.warmup_iterations, |value| {
+                if value.timing_scope == crate::types::BatchTimingScope::ColdEndToEndSubprocess {
+                    0
+                } else {
+                    inputs.config.warmup_iterations
+                }
+            }),
+            eligible_documents,
+            batch_partitions,
+            ocr_language_policy: language_policy,
+        },
+        build_identity,
+    )
 }
 
 impl RunProvenance {
@@ -284,15 +296,20 @@ impl RunProvenance {
         let models = model_identifiers_by_framework(inputs.models);
         reject_models_for_unselected_frameworks(&inputs)?;
 
+        let repository = capture_repository(inputs.fixture_root);
         let mut frameworks = Vec::with_capacity(inputs.frameworks.len());
         for adapter in inputs.frameworks {
-            frameworks.push(capture_framework(adapter, &inputs, &models));
+            let (framework, build_identity) = capture_framework(adapter, &inputs, &models);
+            if let Some(identity) = build_identity {
+                validate_xberg_build_identity(&repository, &framework.name, &identity.build_id, &identity.path)?;
+            }
+            frameworks.push(framework);
         }
 
         Ok(Self {
             schema_version: PROVENANCE_SCHEMA_VERSION,
             harness_version: env!("CARGO_PKG_VERSION").to_string(),
-            repository: capture_repository(inputs.fixture_root),
+            repository,
             corpus,
             frameworks,
             timing: TimingProvenance {
@@ -400,6 +417,46 @@ fn capture_repository(start_directory: &Path) -> RepositoryProvenance {
     )
     .map(|output| !output.is_empty());
     RepositoryProvenance { commit, dirty }
+}
+
+fn normalize_full_commit_id(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(normalized.len(), 40 | 64)
+        .then_some(normalized)
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+pub(crate) fn validate_xberg_build_identity(
+    repository: &RepositoryProvenance,
+    framework: &str,
+    actual_build_id: &str,
+    executable_path: &Path,
+) -> Result<()> {
+    if repository.dirty != Some(false) {
+        return Ok(());
+    }
+
+    let expected = repository
+        .commit
+        .as_deref()
+        .and_then(normalize_full_commit_id)
+        .ok_or_else(|| {
+            Error::Benchmark(
+                "cannot validate Xberg build identity for clean checkout: repository commit is missing or not a full commit ID"
+                    .to_string(),
+            )
+        })?;
+    let actual = normalize_full_commit_id(actual_build_id);
+    if actual.as_deref() == Some(expected.as_str()) {
+        return Ok(());
+    }
+
+    Err(Error::Benchmark(format!(
+        "Xberg executable build ID mismatch for framework '{framework}': expected checkout commit \
+         {expected}, actual embedded build ID '{}', executable `{}`",
+        actual_build_id.trim(),
+        executable_path.display()
+    )))
 }
 
 fn git_output(repository_root: &Path, args: &[&str]) -> Option<String> {
@@ -533,6 +590,60 @@ mod tests {
         assert_eq!(identity.name, "private-binary");
         assert!(!json.contains(temp.path().to_string_lossy().as_ref()));
         assert!(identity.blake3.is_some());
+    }
+
+    #[test]
+    fn version_two_executable_provenance_defaults_missing_build_id() {
+        let json = serde_json::json!({
+            "name": "legacy-xberg",
+            "blake3": "a".repeat(64),
+            "invocation_blake3": "b".repeat(64)
+        });
+
+        let executable: ExecutableProvenance = serde_json::from_value(json).unwrap();
+
+        assert_eq!(executable.build_id, None);
+    }
+
+    #[test]
+    fn clean_checkout_rejects_mismatched_xberg_build_id_with_binary_context() {
+        let repository = RepositoryProvenance {
+            commit: Some("1111111111111111111111111111111111111111".to_string()),
+            dirty: Some(false),
+        };
+        let binary = Path::new("/tmp/stale-xberg");
+
+        let error = validate_xberg_build_identity(
+            &repository,
+            "xberg-markdown-baseline",
+            "2222222222222222222222222222222222222222",
+            binary,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("build ID mismatch"));
+        assert!(message.contains("1111111111111111111111111111111111111111"));
+        assert!(message.contains("2222222222222222222222222222222222222222"));
+        assert!(message.contains(binary.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn dirty_checkout_records_mismatched_xberg_build_id() {
+        let repository = RepositoryProvenance {
+            commit: Some("1111111111111111111111111111111111111111".to_string()),
+            dirty: Some(true),
+        };
+
+        assert!(
+            validate_xberg_build_identity(
+                &repository,
+                "xberg-markdown-baseline",
+                "1111111111111111111111111111111111111111-dirty-deadbeef",
+                Path::new("/tmp/dirty-xberg"),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
