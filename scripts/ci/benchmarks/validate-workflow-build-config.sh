@@ -109,6 +109,7 @@ setup_job="$(extract_job setup <<<"$workflow_content")"
 aggregate_job="$(extract_job aggregate-and-publish <<<"$workflow_content")"
 setup_rust_step="$(extract_named_step "Setup Rust" <<<"$setup_job")"
 setup_rust_inputs="$(extract_with_inputs <<<"$setup_rust_step")"
+swap_step="$(extract_named_step "Provision swap for all-feature release link" <<<"$setup_job")"
 
 require_exact_input "$setup_rust_inputs" use-sccache '"false"' \
   "setup Rust must disable per-object sccache uploads"
@@ -116,6 +117,14 @@ require_exact_input "$setup_rust_inputs" disable-cache '"false"' \
   "setup Rust must retain the coarse Cargo target cache"
 require_exact_cli_build "$setup_job" \
   "setup must build exactly one all-feature CLI for benchmark size measurement"
+require_step "$swap_step" '^[[:space:]]+run: task benchmark:setup:swap$' \
+  "setup must provision swap through the benchmark task before the all-feature release link"
+swap_line="$(grep -nF -- '- name: Provision swap for all-feature release link' <<<"$setup_job" | cut -d: -f1)"
+cli_build_line="$(grep -nF -- '- name: Build xberg-cli (release, all features + Sceptre tract diagnostic)' <<<"$setup_job" | cut -d: -f1)"
+if [[ -z "$swap_line" || -z "$cli_build_line" || "$swap_line" -ge "$cli_build_line" ]]; then
+  echo "benchmark workflow validation failed: swap must be provisioned before the all-feature release link"
+  exit 1
+fi
 # aggregate reuses the exact xberg-cli binary `setup` built and uploaded
 # (benchmarks-target) rather than cold-rebuilding it. This is what guarantees
 # installation-size consistency -- the measured binary is byte-identical to the

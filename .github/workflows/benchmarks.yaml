@@ -98,6 +98,9 @@ jobs:
         with:
           build-profile: release
 
+      - name: Provision swap for all-feature release link
+        run: task benchmark:setup:swap
+
       - name: Build xberg-cli (release, all features + Sceptre tract diagnostic)
         run: cargo build --locked --release -p xberg-cli --features all,xberg/sceptre-ocr-tract
 

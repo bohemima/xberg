@@ -7,6 +7,14 @@ vars:
   FLAMEGRAPH_DIR: "flamegraphs"
 
 tasks:
+  setup:swap:
+    desc: "Provision Linux swap for the benchmark all-feature release link"
+    platforms: [linux]
+    env:
+      SWAP_SIZE_GIB: '{{ .SWAP_SIZE_GIB | default "16" }}'
+    cmds:
+      - bash scripts/ci/benchmarks/setup-build-swap.sh
+
   validate:scripts:
     desc: "Validate benchmark workflow and local shell helpers"
     cmds:
