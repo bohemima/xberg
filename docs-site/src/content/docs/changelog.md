@@ -13,8 +13,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.3.7] - 2026-10-08
 
+### Added
+
+- **(pdf): pre-extracted spans can use canonical page reading order.** `order_page_spans` applies tagged structure,
+  article-thread, and geometric ordering without parsing page content a second time, including for layer-filtered text.
+
+### Changed
+
+- **(benchmarks): cold-process and warm in-process latency are reported as separate regimes.** Opt-in steady-state
+  Xberg runs retain model sessions across iterations, publish a separate cold-start probe, and remain excluded from
+  cross-framework rankings until competitors expose equivalent persistent-process adapters.
+
 ### Fixed
 
+- **(pdf, ocr): Arabic and Hebrew extraction preserve logical reading order.** Tagged native PDFs use trustworthy
+  structure order without reversing table cells, and Tesseract output orders mixed-direction lines and tables from
+  their local text direction and geometry. Sparse whole-image RTL OCR also retries a single-block segmentation mode
+  when it recovers more strong-script tokens without materially reducing confidence.
+
+- **(benchmarks): benchmark provenance is bound to the executable that actually ran.** Clean-checkout runs now reject
+  stale Xberg binaries whose embedded build identifier does not match the repository commit, and machine-readable
+  `xberg version` output includes that identifier for auditability.
+- **(doc): legacy Word documents preserve headers, footers, footnotes, comments, and text boxes.** Non-body stories
+  are now emitted with their document layers and respect the existing header, footer, and footnote filters instead of
+  being dropped whenever the document also contains body text. (GH#2054)
+- **(ocr): columned prose and punctuation fragments are no longer fabricated as tables.** Long, sparse newsletter
+  columns remain ordinary text in both layout and non-layout extraction, while punctuation-only scan regions fall
+  back to paragraph output without losing recognized content.
+- **(ocr): layout extraction preserves scanned-PDF recognition settings.** Scanned PDFs no longer force Tesseract
+  into whole-image single-block segmentation when layout assembly has detected regions, while known scans keep their
+  sparse-text segmentation and source-resolution preprocessing hints.
+- **(typst): tables wrapped in figures are preserved.** A `#table(...)` nested inside a `#figure(...)`, including
+  through an `align(...)` wrapper, now reaches structured and rendered output instead of being discarded with the
+  figure body.
+- **(latex): multiline section titles remain headings.** A section command whose braced title spans physical lines
+  now produces one heading with its label anchor instead of flattened paragraph text and command fragments.
 - **(python, pdf): Python post-processors preserve formatted output and hide internal PDF heading annotations.**
   Returning an `ExtractedDocument` from a Python post-processor no longer replaces Rust-only document state, so a
   no-op processor keeps rendered headings and chunks. Font-size annotations used for native PDF heading detection are
