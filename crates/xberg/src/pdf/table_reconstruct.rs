@@ -1157,17 +1157,13 @@ fn post_process_table_inner(
                 .flat_map(|row| row.iter())
                 .filter(|cell| !cell.trim().is_empty())
                 .count();
-            if total_data_cells > 0
-                && filled_cells * 100 > total_data_cells * 80
-                && looks_like_prose_in_columns(&processed[1..], num_cols)
-            {
+            if total_data_cells > 0 && looks_like_prose_in_columns(&processed[1..], num_cols) {
                 tracing::debug!(
                     target: "xberg::table_reconstruct",
-                    reason = "prose_in_columns_dense",
+                    reason = "prose_in_columns_high_row_low_column",
                     filled_cells,
                     total_data_cells,
                     fill_ratio = filled_cells as f64 / total_data_cells as f64,
-                    limit = 0.8,
                     rows = processed.len(),
                     cols = num_cols,
                     "post_process_table_inner: rejected table"
@@ -1788,13 +1784,11 @@ fn looks_like_shredded_prose_row(row: &[String], num_cols: usize) -> bool {
         .is_some_and(|last| matches!(last.chars().last(), Some(';' | ':' | '.' | ',')))
 }
 
-/// Decide whether a dense grid of data rows is prose laid out in columns rather
-/// than a real table. The signal is words-per-cell: a table cell holds a value (a
-/// number, a code, a short label), while columned prose (a two-column article, a
-/// wrapped paragraph) fills each cell with a phrase. This gates the density guard
-/// so that a dense numeric ledger (Account | Amount | Note, 30+ rows) is not cut by
-/// row-count alone; genuinely alphabetic prose is still caught downstream by the
-/// alpha-ratio row-coherence check in `is_well_formed_table` (xberg-io/xberg#1223).
+/// Decide whether a many-row narrow grid is prose laid out in columns rather than a real table.
+/// The signal is words-per-cell among rows that populate at least two columns: a table cell holds
+/// a value (a number, a code, a short label), while columned prose fills each cell with a phrase.
+/// Ignoring singleton rows lets this catch alternating newsletter columns without rejecting a
+/// sparse scalar table merely because it has many rows (xberg-io/xberg#1223). ~keep
 fn looks_like_prose_in_columns(data_rows: &[Vec<String>], num_cols: usize) -> bool {
     /// A cell averaging this many words or more reads as a phrase, not a value.
     const PROSE_WORDS_PER_CELL: f64 = 4.0;
@@ -3959,7 +3953,39 @@ mod tests {
             }
         }
         let result = post_process_table(table, true, false);
-        let _ = result;
+        assert!(
+            result.is_some(),
+            "a tall sparse table of scalar values must not be mistaken for columned prose"
+        );
+    }
+
+    #[test]
+    fn high_row_low_column_rejects_sparse_columned_prose() {
+        let mut table = vec![vec!["Sidebar".into(), "Details".into(), "Article".into()]];
+        for row in 0..30 {
+            table.push(match row % 3 {
+                0 => vec![
+                    "Association officer contact information".into(),
+                    "Committee and member service details".into(),
+                    "Retirees face increasing pension threats".into(),
+                ],
+                1 => vec![
+                    "Mailing address and telephone number".into(),
+                    String::new(),
+                    String::new(),
+                ],
+                _ => vec![
+                    String::new(),
+                    String::new(),
+                    "Additional contributions are always welcome".into(),
+                ],
+            });
+        }
+
+        assert!(
+            post_process_table(table, false, false).is_none(),
+            "alternating newsletter columns must remain prose rather than one page-sized table"
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@
 
 use memchr::memchr;
 
+use crate::ocr::table::tsv_parser::text_without_underscore_marks;
 use crate::types::extraction::BoundingBox;
 use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
 use crate::types::ocr_elements::{OcrBoundingGeometry, OcrConfidence, OcrElementLevel};
@@ -741,8 +742,9 @@ fn parse_paragraph(
             let props = parse_title_properties(&title);
 
             let word_text = extract_inner_text(html, pos);
-            let trimmed = decode_html_entities(&word_text);
-            let trimmed = trimmed.trim();
+            let decoded = decode_html_entities(&word_text);
+            let normalized = text_without_underscore_marks(decoded.trim());
+            let trimmed = normalized.trim();
 
             pos = skip_to_matching_close(html, pos, &tag_name);
 
@@ -1177,6 +1179,22 @@ mod tests {
 
         let conf = elem.ocr_confidence.as_ref().unwrap();
         assert!((conf.recognition - 0.925).abs() < 0.01);
+    }
+
+    #[test]
+    fn numeric_choices_separated_by_blank_marks_remain_distinct_words() {
+        let hocr = r#"<div class="ocr_page" title="bbox 0 0 1000 1500; ppageno 0">
+            <p class="ocr_par" title="bbox 100 100 900 200">
+                <span class="ocr_line" title="bbox 100 100 900 150">
+                    <span class="ocrx_word" title="bbox 100 100 300 140; x_wconf 95">$30__.$25</span>
+                    <span class="ocrx_word" title="bbox 310 100 450 140; x_wconf 95">file_name</span>
+                </span>
+            </p>
+        </div>"#;
+
+        let document = parse_hocr_to_internal_document(hocr);
+
+        assert_eq!(document.elements[0].text, "$30 .$25 file_name");
     }
 
     /// Regression test: Tesseract numbers every single-image `recognize()` call's hOCR page

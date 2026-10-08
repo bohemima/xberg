@@ -1,6 +1,7 @@
 use super::super::error::OcrError;
 use super::super::utils::{TSV_MIN_FIELDS, TSV_WORD_LEVEL};
 use crate::table_core::{HocrWord, is_value, median_word_height};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use xberg_tesseract::WordSymbols;
@@ -220,6 +221,29 @@ fn underscore_mark_runs(chars: &[char]) -> Vec<Range<usize>> {
         .collect()
 }
 
+/// Remove blank-line underscore runs using the same classification as table reconstruction,
+/// separating the retained value pieces so hOCR text cannot fuse two numeric choices. ~keep
+pub(crate) fn text_without_underscore_marks(text: &str) -> Cow<'_, str> {
+    let chars: Vec<char> = text.chars().collect();
+    let marks = underscore_mark_runs(&chars);
+    if marks.is_empty() {
+        return Cow::Borrowed(text);
+    }
+
+    let mut pieces = Vec::with_capacity(marks.len() + 1);
+    let mut start = 0;
+    for mark in marks {
+        if start < mark.start {
+            pieces.push(chars[start..mark.start].iter().collect::<String>());
+        }
+        start = mark.end;
+    }
+    if start < chars.len() {
+        pieces.push(chars[start..].iter().collect());
+    }
+    Cow::Owned(pieces.join(" "))
+}
+
 /// The horizontal extent of each character of `word`, from the symbols Tesseract reported for it,
 /// or `None` when no reported word matches its box or its symbols do not spell its text.
 fn symbol_char_spans(word: &HocrWord, chars: &[char], symbols: &[WordSymbols]) -> Option<Vec<(u32, u32)>> {
@@ -285,6 +309,19 @@ mod tests {
             .into_iter()
             .map(|word| (word.text, word.left, word.width))
             .collect()
+    }
+
+    #[test]
+    fn text_mark_cleanup_separates_values_and_borrows_ordinary_underscores() {
+        assert_eq!(text_without_underscore_marks("$30__.$25"), "$30 .$25");
+        assert_eq!(text_without_underscore_marks("___7,073_"), "7,073");
+        assert_eq!(text_without_underscore_marks("(2,100)__(2,163)"), "(2,100) (2,163)");
+
+        for text in ["file_name", "ID__001", "__init__", "____"] {
+            let cleaned = text_without_underscore_marks(text);
+            assert_eq!(cleaned, text);
+            assert!(matches!(cleaned, Cow::Borrowed(_)));
+        }
     }
 
     fn table_words(tsv_rows: &str) -> Vec<(String, u32, u32)> {
