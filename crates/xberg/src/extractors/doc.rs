@@ -727,6 +727,13 @@ mod tests {
         assert_header_story_falls_back(PlcKind::OutOfRange).await;
     }
 
+    /// A readable table with the wrong story count must not be split, or the
+    /// stories after the separators are filed wrongly or dropped as separators.
+    #[tokio::test]
+    async fn a_plcf_hdd_with_a_partial_section_falls_back_to_the_whole_header_story() {
+        assert_header_story_falls_back(PlcKind::PartialSection).await;
+    }
+
     #[tokio::test]
     async fn missing_note_tables_make_each_note_story_one_definition_with_a_warning() {
         let doc = extract_synthetic(PlcKind::Valid, PlcKind::Absent).await;

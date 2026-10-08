@@ -560,6 +560,9 @@ pub(crate) enum PlcKind {
     Absent,
     /// `fc` points past the end of the table stream.
     OutOfRange,
+    /// Lists the separator stories and one story of a section, so the count
+    /// is not six per section. Readable, but not a `PlcfHdd` shape.
+    PartialSection,
 }
 
 /// Text for each CP range of a synthetic Word 97 document. Every string is
@@ -596,6 +599,11 @@ fn write_story_plc(
     kind: PlcKind,
 ) {
     let (mut fc, mut lcb) = (0u32, 0u32);
+    let stories = if kind == PlcKind::PartialSection {
+        &stories[..stories.len().min(SEPARATOR_STORIES.len() + 1)]
+    } else {
+        stories
+    };
     if !stories.is_empty() && kind != PlcKind::Absent {
         let mut cps = Vec::new();
         let mut cp = 0u32;

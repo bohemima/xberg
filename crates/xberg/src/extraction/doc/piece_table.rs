@@ -437,7 +437,8 @@ impl StoryTables {
             |index, range: SubdocRange| read_story_bounds(word_doc, table_stream, rg_fc_lcb_offset, index, range.len());
         Self {
             footnote: read(FIB_FC_LCB_IDX_PLCFFND_TXT, ranges.footnote),
-            header: read(FIB_FC_LCB_IDX_PLCF_HDD, ranges.header),
+            header: read(FIB_FC_LCB_IDX_PLCF_HDD, ranges.header)
+                .filter(|bounds| header_table_has_whole_sections(bounds)),
             annotation: read(FIB_FC_LCB_IDX_PLCFAND_TXT, ranges.annotation),
         }
     }
@@ -477,10 +478,20 @@ fn read_story_bounds(
 /// footer, odd footer, first-page header, first-page footer ([MS-DOC]
 /// `Plcfhdd`). ~keep
 const HEADER_SEPARATOR_STORIES: usize = 6;
+const HEADER_STORIES_PER_SECTION: usize = 6;
+
+/// Whether a `PlcfHdd` has the shape above: the separator stories and whole
+/// sections, at least one. Any other count would file stories under the wrong
+/// kind or drop them as separators, so such a table counts as malformed.
+fn header_table_has_whole_sections(bounds: &[usize]) -> bool {
+    let stories = bounds.len().saturating_sub(1);
+    stories > HEADER_SEPARATOR_STORIES
+        && (stories - HEADER_SEPARATOR_STORIES).is_multiple_of(HEADER_STORIES_PER_SECTION)
+}
 
 /// Whether header story `index` is a header or a footer; `None` for a separator.
 fn header_story_kind(index: usize) -> Option<DocSubdocumentKind> {
-    match index.checked_sub(HEADER_SEPARATOR_STORIES)? % 6 {
+    match index.checked_sub(HEADER_SEPARATOR_STORIES)? % HEADER_STORIES_PER_SECTION {
         0 | 1 | 4 => Some(DocSubdocumentKind::Header),
         _ => Some(DocSubdocumentKind::Footer),
     }
