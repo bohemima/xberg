@@ -8086,12 +8086,12 @@ Name: ___
 
     #[cfg(feature = "pdf")]
     #[test]
-    fn should_keep_scan_hint_but_not_force_whole_image_psm_during_layout_assembly() {
+    fn should_keep_whole_image_psm_and_scan_hints_during_layout_assembly() {
         let config = crate::core::config::ocr::OcrConfig::default();
 
         let hinted = ocr_config_with_page_rotation_hint(&config, 0, Some(288.0), true, false, true);
 
-        assert_eq!(hinted.tesseract_config.as_ref().and_then(|config| config.psm), None);
+        assert_eq!(hinted.tesseract_config.as_ref().and_then(|config| config.psm), Some(11));
         assert_eq!(
             hinted
                 .backend_options
