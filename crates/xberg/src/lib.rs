@@ -39,9 +39,10 @@
 
 /// Return the source build identifier embedded in this Xberg library.
 ///
-/// This is hidden from generated API documentation because it is intended for
-/// executable provenance checks, not as a stable content or cache identifier.
+/// This is intended for executable provenance checks, not as a stable content
+/// or cache identifier.
 #[doc(hidden)]
+#[cfg_attr(alef, alef(skip))]
 #[must_use]
 pub const fn embedded_build_id() -> &'static str {
     env!("XBERG_BUILD_ID")
