@@ -65,6 +65,7 @@ pub(crate) struct DocSubdocument {
 pub(crate) enum DocSubdocumentKind {
     Header,
     Footer,
+    HeaderFooter,
     Footnote,
     Comment,
     TextBox,

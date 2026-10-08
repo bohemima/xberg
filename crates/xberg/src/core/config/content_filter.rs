@@ -47,6 +47,7 @@ pub struct ContentFilterConfig {
     /// - PDF: Prevents the layout model from treating `Footnote`-classified
     ///   regions as furniture, so footnote bodies survive alongside the main
     ///   text instead of being silently dropped.
+    /// - DOC: Includes footnote definitions in extracted output.
     /// - Other formats: No effect currently.
     ///
     /// Default: `false` (footnotes are stripped), matching the existing

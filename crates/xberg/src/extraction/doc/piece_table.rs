@@ -522,10 +522,11 @@ fn collect_subdocuments(
     warnings: &mut Vec<ProcessingWarning>,
 ) -> Vec<DocSubdocument> {
     let mut subdocuments = Vec::new();
-    for (raw, bounds, kind, fallback_warning) in [
+    for (raw, bounds, kind, fallback_kind, fallback_warning) in [
         (
             &text.footnote,
             &tables.footnote,
+            DocSubdocumentKind::Footnote,
             DocSubdocumentKind::Footnote,
             "Footnote table (PlcffndTxt) is missing or malformed; all footnote text is reported as one footnote",
         ),
@@ -533,11 +534,13 @@ fn collect_subdocuments(
             &text.header,
             &tables.header,
             DocSubdocumentKind::Header,
-            "Header table (PlcfHdd) is missing or malformed; all header and footer text is reported as header text",
+            DocSubdocumentKind::HeaderFooter,
+            "Header table (PlcfHdd) is missing or malformed; all header and footer text is reported as combined header/footer text",
         ),
         (
             &text.annotation,
             &tables.annotation,
+            DocSubdocumentKind::Comment,
             DocSubdocumentKind::Comment,
             "Comment table (PlcfandTxt) is missing or malformed; all comment text is reported as one comment",
         ),
@@ -546,7 +549,10 @@ fn collect_subdocuments(
             let whole = normalize_doc_text(raw);
             if !whole.is_empty() {
                 crate::core::diagnostics::push_warning(warnings, DOC_WARNING_SOURCE, fallback_warning);
-                subdocuments.push(DocSubdocument { kind, text: whole });
+                subdocuments.push(DocSubdocument {
+                    kind: fallback_kind,
+                    text: whole,
+                });
             }
             continue;
         };

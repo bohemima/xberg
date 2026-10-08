@@ -109,7 +109,7 @@ impl InternalDocumentExtractor for DocExtractor {
             push_blank_line_chunks(&mut doc, &result.content);
         } else {
             push_paragraph_elements(&mut doc, &result.paragraphs);
-            push_subdocuments(&mut doc, &result.subdocuments);
+            push_subdocuments(&mut doc, &result.subdocuments, config.content_filter.as_ref());
         }
 
         // As in the DOCX extractor, the content filter decides here whether
@@ -118,6 +118,7 @@ impl InternalDocumentExtractor for DocExtractor {
             doc.elements.retain(|element| match element.layer {
                 ContentLayer::Header => filter.include_headers,
                 ContentLayer::Footer => filter.include_footers,
+                ContentLayer::Footnote if element.kind == ElementKind::FootnoteDefinition => filter.include_footnotes,
                 _ => true,
             });
         }
@@ -273,12 +274,23 @@ fn push_paragraph_elements(doc: &mut InternalDocument, paragraphs: &[DocParagrap
 /// way the DOCX path does: headers and footers one paragraph per line on their
 /// own layers, each footnote and comment as one definition on the Footnote layer
 /// with its paragraphs joined by a space, and text boxes as body paragraphs.
-fn push_subdocuments(doc: &mut InternalDocument, subdocuments: &[DocSubdocument]) {
+fn push_subdocuments(
+    doc: &mut InternalDocument,
+    subdocuments: &[DocSubdocument],
+    content_filter: Option<&crate::core::config::ContentFilterConfig>,
+) {
     let mut footnotes = 0;
     let mut comments = 0;
     for subdocument in subdocuments {
+        if subdocument.kind == DocSubdocumentKind::HeaderFooter
+            && content_filter.is_some_and(|filter| !filter.include_headers || !filter.include_footers)
+        {
+            continue;
+        }
         let (kind, layer, anchor) = match subdocument.kind {
-            DocSubdocumentKind::Header => (ElementKind::Paragraph, ContentLayer::Header, None),
+            DocSubdocumentKind::Header | DocSubdocumentKind::HeaderFooter => {
+                (ElementKind::Paragraph, ContentLayer::Header, None)
+            }
             DocSubdocumentKind::Footer => (ElementKind::Paragraph, ContentLayer::Footer, None),
             DocSubdocumentKind::TextBox => (ElementKind::Paragraph, ContentLayer::Body, None),
             DocSubdocumentKind::Footnote => {
@@ -655,6 +667,14 @@ mod tests {
     const COMMENTS: [&str; 2] = ["\u{5}First comment\r", "\u{5}Second comment\r"];
 
     async fn extract_synthetic(plcf_hdd: PlcKind, note_plcs: PlcKind) -> InternalDocument {
+        extract_synthetic_with_config(plcf_hdd, note_plcs, ExtractionConfig::default()).await
+    }
+
+    async fn extract_synthetic_with_config(
+        plcf_hdd: PlcKind,
+        note_plcs: PlcKind,
+        config: ExtractionConfig,
+    ) -> InternalDocument {
         let bytes = build_synthetic_doc(&SyntheticDoc {
             body: "Body paragraph\r",
             footnotes: &FOOTNOTES,
@@ -664,7 +684,7 @@ mod tests {
             note_plcs,
         });
         DocExtractor::new()
-            .extract_content(&bytes, LEGACY_WORD_MIME_TYPE, &ExtractionConfig::default())
+            .extract_content(&bytes, LEGACY_WORD_MIME_TYPE, &config)
             .await
             .expect("a synthetic DOC should extract without error")
     }
@@ -732,6 +752,51 @@ mod tests {
     #[tokio::test]
     async fn a_plcf_hdd_with_a_partial_section_falls_back_to_the_whole_header_story() {
         assert_header_story_falls_back(PlcKind::PartialSection).await;
+    }
+
+    #[tokio::test]
+    async fn ambiguous_header_footer_text_requires_both_filter_permissions() {
+        for plcf_hdd in [PlcKind::Absent, PlcKind::OutOfRange, PlcKind::PartialSection] {
+            for (include_headers, include_footers, expected) in [
+                (false, false, false),
+                (true, false, false),
+                (false, true, false),
+                (true, true, true),
+            ] {
+                let config = ExtractionConfig {
+                    content_filter: Some(crate::core::config::ContentFilterConfig {
+                        include_headers,
+                        include_footers,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let doc = extract_synthetic_with_config(plcf_hdd, PlcKind::Valid, config).await;
+                let ambiguous_text_present = doc.elements.iter().any(|element| {
+                    element.text.contains("Odd page header") || element.text.contains("Odd page footer")
+                });
+
+                assert_eq!(
+                    ambiguous_text_present, expected,
+                    "ambiguous header/footer text with include_headers={include_headers} and include_footers={include_footers}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn include_footnotes_false_drops_footnotes_but_preserves_comments() {
+        let config = ExtractionConfig {
+            content_filter: Some(crate::core::config::ContentFilterConfig::default()),
+            ..Default::default()
+        };
+        let doc = extract_synthetic_with_config(PlcKind::Valid, PlcKind::Valid, config).await;
+
+        assert_eq!(definitions(&doc, ElementKind::FootnoteDefinition), Vec::new());
+        assert_eq!(
+            definitions(&doc, ElementKind::CommentDefinition),
+            vec![(Some("cmt1"), "First comment"), (Some("cmt2"), "Second comment")]
+        );
     }
 
     /// A table that stops before `ccp - 1` would silently lose the notes after
