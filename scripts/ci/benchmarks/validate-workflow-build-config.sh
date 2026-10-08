@@ -99,17 +99,20 @@ require_step() {
   local pattern="$2"
   local description="$3"
 
-  if ! grep -qE "$pattern" <<<"$job"; then
+  if ! grep -qE -- "$pattern" <<<"$job"; then
     echo "benchmark workflow validation failed: $description"
     exit 1
   fi
 }
 
 setup_job="$(extract_job setup <<<"$workflow_content")"
+validate_harness_job="$(extract_job validate-harness <<<"$workflow_content")"
 aggregate_job="$(extract_job aggregate-and-publish <<<"$workflow_content")"
 setup_rust_step="$(extract_named_step "Setup Rust" <<<"$setup_job")"
 setup_rust_inputs="$(extract_with_inputs <<<"$setup_rust_step")"
 swap_step="$(extract_named_step "Provision swap for all-feature release link" <<<"$setup_job")"
+cohort_validation_step="$(extract_named_step "Validate benchmark cohorts" <<<"$validate_harness_job")"
+harness_contract_step="$(extract_named_step "Validate benchmark harness contracts" <<<"$validate_harness_job")"
 
 require_exact_input "$setup_rust_inputs" use-sccache '"false"' \
   "setup Rust must disable per-object sccache uploads"
@@ -123,6 +126,54 @@ swap_line="$(grep -nF -- '- name: Provision swap for all-feature release link' <
 cli_build_line="$(grep -nF -- '- name: Build xberg-cli (release, all features + Sceptre tract diagnostic)' <<<"$setup_job" | cut -d: -f1)"
 if [[ -z "$swap_line" || -z "$cli_build_line" || "$swap_line" -ge "$cli_build_line" ]]; then
   echo "benchmark workflow validation failed: swap must be provisioned before the all-feature release link"
+  exit 1
+fi
+if grep -Fq -- '- name: Validate benchmark cohorts' <<<"$setup_job" ||
+  grep -Fq -- '- name: Validate benchmark harness contracts' <<<"$setup_job"; then
+  echo "benchmark workflow validation failed: deterministic harness tests must not relink in the measured setup job"
+  exit 1
+fi
+require_step "$validate_harness_job" '^  validate-harness:$' \
+  "deterministic harness tests must run in a standalone job"
+require_step "$validate_harness_job" '^[[:space:]]+runs-on: ubuntu-latest$' \
+  "standalone harness validation must use a fresh x86 Linux runner"
+require_step "$validate_harness_job" '^[[:space:]]+timeout-minutes: 360$' \
+  "standalone harness validation must retain the long build timeout"
+require_step "$validate_harness_job" '^[[:space:]]+- uses: actions/checkout@v7$' \
+  "standalone harness validation must check out the benchmark source"
+require_step "$validate_harness_job" '^[[:space:]]+ref: \$\{\{ github\.event\.inputs\.branch \|\| github\.sha \}\}$' \
+  "standalone harness validation must check out the dispatched benchmark revision"
+require_step "$validate_harness_job" '^[[:space:]]+submodules: recursive$' \
+  "standalone harness validation must initialize fixture submodules"
+for required_step in \
+  'Free disk space' \
+  'Install system dependencies' \
+  'Setup Rust' \
+  'Setup ONNX Runtime' \
+  'Fetch test_documents fixtures'; do
+  require_step "$validate_harness_job" "- name: ${required_step}$" \
+    "standalone harness validation is missing required step: ${required_step}"
+done
+if grep -qE '^[[:space:]]+(needs:|continue-on-error:)' <<<"$validate_harness_job"; then
+  echo "benchmark workflow validation failed: standalone harness validation must run in parallel and remain required"
+  exit 1
+fi
+if grep -Fq -- 'uses: ./.github/actions/setup-layout-models' <<<"$validate_harness_job"; then
+  echo "benchmark workflow validation failed: deterministic harness tests must not download runtime layout models"
+  exit 1
+fi
+require_step "$cohort_validation_step" \
+  "cargo test --locked -p benchmark-harness --lib 'cohort::tests::' 2>&1 \\| tee /tmp/cohort-tests\\.log" \
+  "cohort validation must use the non-release library test target"
+require_step "$harness_contract_step" \
+  'cargo test --locked -p benchmark-harness --no-fail-fast$' \
+  "harness contract validation must use the non-release test profile"
+for contract_target in validate_artifacts lossless_aggregation fixture_validation aggregate_schema; do
+  require_step "$harness_contract_step" "--test ${contract_target}" \
+    "harness contract validation is missing target: ${contract_target}"
+done
+if grep -q -- '--release' <<<"${cohort_validation_step}${harness_contract_step}"; then
+  echo "benchmark workflow validation failed: deterministic harness tests must not use the release profile"
   exit 1
 fi
 # aggregate reuses the exact xberg-cli binary `setup` built and uploaded

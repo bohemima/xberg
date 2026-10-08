@@ -131,25 +131,6 @@ jobs:
           cargo run --locked --release -p benchmark-harness -- validate-gt
           --fixtures tools/benchmark-harness/fixtures --strict
 
-      - name: Validate benchmark cohorts
-        run: |
-          set -euo pipefail
-          cargo test --locked --release -p benchmark-harness 'cohort::tests::' 2>&1 | tee /tmp/cohort-tests.log
-          if ! grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/cohort-tests.log; then
-            echo "::error::'cohort::tests::' matched 0 tests -- benchmark cohort validation silently stopped executing" >&2
-            exit 1
-          fi
-
-      - name: Validate benchmark harness contracts
-        # --no-fail-fast: cargo stops after the first failing test BINARY, so a
-        # single broken contract hides the other targets entirely. Run 31632507453
-        # reported results for only two of these four because fixture_validation
-        # failed; whether the remaining two also failed was unknowable from the log.
-        run: >-
-          cargo test --locked --release -p benchmark-harness --no-fail-fast
-          --test validate_artifacts --test lossless_aggregation
-          --test fixture_validation --test aggregate_schema
-
       - name: Validate workflow matrix against harness contracts
         run: scripts/ci/benchmarks/validate-workflow-matrix.py
 
@@ -186,6 +167,55 @@ jobs:
 
       - name: Log disk space after artifact upload
         run: scripts/ci/validate/show-disk-space.sh "Disk space after artifact upload"
+
+  validate-harness:
+    name: Validate benchmark harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.branch || github.sha }}
+          submodules: recursive
+
+      - name: Free disk space
+        uses: xberg-io/actions/free-disk-space-linux@v1
+
+      - name: Install system dependencies
+        uses: ./.github/actions/install-system-deps
+
+      - name: Setup Rust
+        uses: xberg-io/actions/setup-rust@v1
+        with:
+          cache-key-prefix: benchmarks-validate-harness
+          install-llvm-cov: "false"
+
+      - name: Setup ONNX Runtime
+        uses: ./.github/actions/setup-onnx-runtime
+        with:
+          ort-version: ${{ env.ORT_VERSION }}
+
+      - name: Fetch test_documents fixtures
+        uses: xberg-io/actions/fetch-test-documents@v1
+
+      # ~keep These deterministic tests validate configuration and artifact contracts; they do
+      # ~keep not measure the release binaries built by setup and must not trigger another fat-LTO link.
+      - name: Validate benchmark cohorts
+        run: |
+          set -euo pipefail
+          cargo test --locked -p benchmark-harness --lib 'cohort::tests::' 2>&1 | tee /tmp/cohort-tests.log
+          if ! grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/cohort-tests.log; then
+            echo "::error::'cohort::tests::' matched 0 tests -- benchmark cohort validation silently stopped executing" >&2
+            exit 1
+          fi
+
+      - name: Validate benchmark harness contracts
+        # ~keep --no-fail-fast runs every named test binary, so one broken contract does not hide
+        # ~keep failures in the other targets (observed in run 31632507453).
+        run: >-
+          cargo test --locked -p benchmark-harness --no-fail-fast
+          --test validate_artifacts --test lossless_aggregation
+          --test fixture_validation --test aggregate_schema
 
   prefetch-tika:
     name: Prefetch Apache Tika
