@@ -96,8 +96,10 @@ pub(crate) struct DocExtractionResult {
     pub paragraphs: Vec<DocParagraph>,
     /// Header, footer, footnote, comment and text-box text, one entry per
     /// story or note. `content` carries the same text as labelled sections;
-    /// `paragraphs` does not. Empty whenever `paragraphs` is empty because the
-    /// document took a path without them.
+    /// `paragraphs` does not. Empty on the paths that carry no paragraph
+    /// properties (Word 6/95, the contiguous fallback). On the piece-table
+    /// path it can be non-empty while `paragraphs` is empty: a document whose
+    /// only text is a header or footer.
     pub subdocuments: Vec<DocSubdocument>,
 }
 
