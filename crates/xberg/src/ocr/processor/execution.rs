@@ -573,6 +573,17 @@ struct TableRegion {
     read_boxes: Vec<HocrWord>,
 }
 
+/// A table needs at least two words with a letter or number. This rejects punctuation-only scan
+/// fragments while retaining their words in the surrounding OCR text. ~keep
+fn has_semantic_ocr_table_content(words: &[HocrWord]) -> bool {
+    words
+        .iter()
+        .filter(|word| word.text.chars().any(char::is_alphanumeric))
+        .take(2)
+        .count()
+        == 2
+}
+
 impl TableRegion {
     fn push(&mut self, word: HocrWord) {
         self.read_boxes.push(word.clone());
@@ -2289,6 +2300,15 @@ pub(super) fn perform_ocr(
             {
                 region.drop_normalized_band_edge_glyphs();
             }
+            if !has_semantic_ocr_table_content(&region.words) {
+                tracing::debug!(
+                    target: "xberg::ocr::tables",
+                    region_index,
+                    word_count = region.words.len(),
+                    "OCR table region skipped: insufficient semantic content"
+                );
+                continue;
+            }
 
             let region_left = region.words.iter().map(|w| w.left).min().unwrap_or(0);
             let region_top = region.words.iter().map(|w| w.top).min().unwrap_or(0);
@@ -3527,6 +3547,38 @@ mod tests {
             "both vectors stay parallel"
         );
         assert!(region.words.iter().all(|word| word.text != "="));
+    }
+
+    #[test]
+    fn punctuation_only_footer_is_not_an_ocr_table_candidate() {
+        let words = vec![
+            word_at(461, 2494, 44, 24, "["),
+            word_at(915, 2494, 37, 25, "『"),
+            word_at(1390, 2494, 63, 25, "!"),
+            word_at(1993, 2494, 78, 25, "|"),
+            word_at(461, 2519, 37, 6, "|"),
+            word_at(749, 2519, 81, 6, "|"),
+            word_at(915, 2518, 37, 7, "ー"),
+            word_at(2088, 2519, 78, 6, "|"),
+        ];
+
+        assert!(!has_semantic_ocr_table_content(&words));
+    }
+
+    #[test]
+    fn numeric_symbol_heavy_grid_is_an_ocr_table_candidate() {
+        let words = vec![
+            word_at(100, 100, 30, 20, "$"),
+            word_at(200, 100, 30, 20, "%"),
+            word_at(300, 100, 40, 20, "Q1"),
+            word_at(400, 100, 40, 20, "Q2"),
+            word_at(100, 140, 30, 20, "¥"),
+            word_at(200, 140, 30, 20, "—"),
+            word_at(300, 140, 70, 20, "1,200"),
+            word_at(400, 140, 50, 20, "12%"),
+        ];
+
+        assert!(has_semantic_ocr_table_content(&words));
     }
 
     /// The line-row pass (GH#1834) rewrites each word's box onto its row's band but leaves
