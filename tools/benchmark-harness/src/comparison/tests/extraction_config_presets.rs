@@ -9,6 +9,60 @@ use crate::comparison::extraction_config::{
 };
 
 #[test]
+fn layout_preset_matches_ci_native_layout_semantics() {
+    let config = build_extraction_config(Pipeline::Layout);
+
+    assert!(!config.force_ocr, "native layout must not force OCR");
+    assert!(config.layout.is_some(), "native layout must enable layout detection");
+    assert!(
+        config.use_layout_for_markdown,
+        "native layout must use detections when rendering Markdown"
+    );
+    assert_eq!(
+        config.ocr.as_ref().map(|ocr| ocr.auto_rotate),
+        None,
+        "native layout must not enable OCR auto-rotation"
+    );
+}
+
+#[test]
+fn every_layout_named_preset_uses_layout_for_markdown() {
+    let layout_pipelines = [
+        Pipeline::Layout,
+        Pipeline::TesseractLayout,
+        Pipeline::PaddleLayout,
+        Pipeline::PaddleV6SmallLayout,
+        Pipeline::PaddleV6SmallLayoutDetSide1024,
+        Pipeline::PaddleV6SmallLayoutDetSide1536,
+        Pipeline::PaddleV6SmallLayoutDetSide2048,
+        Pipeline::PaddleV6SmallLayoutDetDbThresh020,
+        Pipeline::PaddleV6SmallLayoutDetDbBoxThresh035,
+        Pipeline::PaddleV6SmallLayoutDropScore030,
+        Pipeline::PaddleV6SmallLayoutDropScore040,
+        Pipeline::PaddleV6TinyLayout,
+        Pipeline::PaddleServerLayout,
+        Pipeline::SceptreLayout,
+        Pipeline::LayoutSlanetWired,
+        Pipeline::LayoutSlanetWireless,
+        Pipeline::LayoutSlanetPlus,
+        Pipeline::LayoutSlanetAuto,
+        Pipeline::NativeLayout,
+        Pipeline::NativeReadingOrder,
+        Pipeline::CandleGlmOcrLayout,
+        Pipeline::CandleGlmOcrLayoutChart,
+    ];
+
+    for pipeline in layout_pipelines {
+        let config = build_extraction_config(pipeline);
+        assert!(
+            config.use_layout_for_markdown,
+            "layout-named preset {} must use detections when rendering Markdown",
+            pipeline.name()
+        );
+    }
+}
+
+#[test]
 fn timed_xberg_pipeline_configs_disable_extraction_cache() {
     for pipeline in Pipeline::all_xberg() {
         let config = build_extraction_config(pipeline);

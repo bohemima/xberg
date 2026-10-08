@@ -556,7 +556,10 @@ pub fn build_extraction_config(pipeline: Pipeline) -> xberg::ExtractionConfig {
 
     let mut config = match pipeline {
         Pipeline::Baseline | Pipeline::Docling | Pipeline::PaddleOcrPython | Pipeline::RapidOcr => base,
-        Pipeline::Layout => tesseract_inline_config(base, Some(LayoutDetectionConfig::default()), true),
+        Pipeline::Layout => xberg::ExtractionConfig {
+            layout: Some(LayoutDetectionConfig::default()),
+            ..base
+        },
         Pipeline::TesseractSingleBlock => build_tesseract_extraction_config(TESSERACT_PSM_SINGLE_BLOCK),
         Pipeline::TesseractVerticalBlock => build_tesseract_extraction_config(TESSERACT_PSM_VERTICAL_BLOCK),
         Pipeline::TesseractSparseText => build_tesseract_extraction_config(TESSERACT_PSM_SPARSE_TEXT),
@@ -597,6 +600,9 @@ pub fn build_extraction_config(pipeline: Pipeline) -> xberg::ExtractionConfig {
         | Pipeline::CandlePaddleocrVl15 => candle_pipeline_config(pipeline, base),
     };
 
+    if config.layout.is_some() {
+        config.use_layout_for_markdown = true;
+    }
     disable_timed_extraction_caches(&mut config);
     config
 }
