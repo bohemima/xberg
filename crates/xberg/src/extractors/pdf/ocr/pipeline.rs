@@ -1140,6 +1140,7 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
                 };
                 let idx = *page_idx;
                 let cancel_token = config.cancel_token.clone();
+                let original_config = ocr_config_resolved.clone();
                 join_set.spawn(async move {
                     if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
                         return (
@@ -1150,7 +1151,16 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
                             Err(crate::XbergError::Cancelled),
                         );
                     }
-                    let result = backend_clone.process_image_owned(upright_data, &config_clone).await;
+                    let result = crate::extractors::image::process_whole_image_ocr_with_sparse_retry(
+                        &backend_clone,
+                        upright_data,
+                        &original_config,
+                        &config_clone,
+                        whole_page_raster,
+                        false,
+                        cancel_token.as_ref(),
+                    )
+                    .await;
                     (idx, correction_degrees, upright_width, upright_height, result)
                 });
             }
@@ -1285,6 +1295,18 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
                         continue;
                     }
                 };
+                #[cfg(not(target_arch = "wasm32"))]
+                let result = crate::extractors::image::process_whole_image_ocr_with_sparse_retry(
+                    backend,
+                    upright_data,
+                    &ocr_config_resolved,
+                    config_for_page.as_ref(),
+                    whole_page_raster,
+                    false,
+                    config.cancel_token.as_ref(),
+                )
+                .await;
+                #[cfg(target_arch = "wasm32")]
                 let result = backend
                     .process_image(upright_data.as_slice(), config_for_page.as_ref())
                     .await;
@@ -2569,6 +2591,7 @@ pub(super) async fn extract_with_ocr_for_page(
                     layout_detections.is_some(),
                 )
                 .into_owned();
+                let original_config = ocr_config_owned.clone();
                 // No PDF `/Rotate` is ever known without the `pdf` feature (`page_rotation_degrees`
                 // is always `0` above in that build), so there is nothing to correct upright.
                 #[cfg(feature = "pdf")]
@@ -2593,7 +2616,16 @@ pub(super) async fn extract_with_ocr_for_page(
                             Err(crate::XbergError::Cancelled),
                         );
                     }
-                    let result = backend_clone.process_image_owned(upright_data, &config_clone).await;
+                    let result = crate::extractors::image::process_whole_image_ocr_with_sparse_retry(
+                        &backend_clone,
+                        upright_data,
+                        &original_config,
+                        &config_clone,
+                        whole_page_raster,
+                        false,
+                        cancel_token.as_ref(),
+                    )
+                    .await;
                     (idx, correction_degrees, upright_width, upright_height, result)
                 });
             }
@@ -2709,9 +2741,25 @@ pub(super) async fn extract_with_ocr_for_page(
                 let ocr_result = if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
                     Err(crate::XbergError::Cancelled)
                 } else {
-                    backend
-                        .process_image(upright_data.as_slice(), config_for_page.as_ref())
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        crate::extractors::image::process_whole_image_ocr_with_sparse_retry(
+                            backend,
+                            upright_data,
+                            &ocr_config_owned,
+                            config_for_page.as_ref(),
+                            whole_page_raster,
+                            false,
+                            config.cancel_token.as_ref(),
+                        )
                         .await
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        backend
+                            .process_image(upright_data.as_slice(), config_for_page.as_ref())
+                            .await
+                    }
                 };
                 crate::engine::seams::emit_ocr_page(
                     page_index_offset + *page_idx + 1,

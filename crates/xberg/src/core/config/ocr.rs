@@ -573,6 +573,28 @@ pub(crate) const PAGE_ROTATION_DEGREES_BACKEND_OPTION: &str = "page_rotation_deg
 #[allow(dead_code)]
 pub(crate) const KNOWN_FULL_PAGE_SCAN_BACKEND_OPTION: &str = "known_full_page_scan";
 
+#[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline",))]
+pub(crate) fn is_strong_rtl_tesseract_language(language: &str) -> bool {
+    language.split('+').any(|language| {
+        matches!(
+            language.trim().to_ascii_lowercase().as_str(),
+            "ara"
+                | "aze_ara"
+                | "ckb"
+                | "div"
+                | "fas"
+                | "heb"
+                | "kir_ara"
+                | "pus"
+                | "snd"
+                | "uig"
+                | "urd"
+                | "uzb_ara"
+                | "yid"
+        )
+    })
+}
+
 fn default_priority() -> u32 {
     100
 }

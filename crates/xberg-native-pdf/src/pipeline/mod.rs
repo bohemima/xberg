@@ -46,7 +46,7 @@ pub use config::{
 pub use logging::{extract_log_debug, extract_log_error, extract_log_info, extract_log_trace, extract_log_warn};
 pub use metrics::{BatchMetrics, ExtractionMetrics};
 pub use ordered_span::{OrderedSpans, OrderedTextSpan, ReadingOrderInfo, ReadingOrderSource, StructRole};
-pub use page_order::{page_reading_order, page_reading_order_no_artifacts};
+pub use page_order::{order_page_spans, page_reading_order, page_reading_order_no_artifacts};
 pub use reading_order::{ReadingOrderContext, ReadingOrderStrategy, TategakiStrategy, XYCutStrategy};
 pub use text_processing::WhitespaceNormalizer;
 
@@ -192,7 +192,15 @@ fn reorder_rtl_word_runs(ordered: &mut [OrderedTextSpan]) {
         while last > start + 1 && is_space(&ordered[last - 1]) {
             last -= 1;
         }
-        if last - start >= 2 {
+        let first_word_x = ordered[start..last]
+            .iter()
+            .find(|span| !is_space(span))
+            .map(|span| span.span.bbox.x);
+        let last_word_x = ordered[start..last]
+            .iter()
+            .rfind(|span| !is_space(span))
+            .map(|span| span.span.bbox.x);
+        if last - start >= 2 && first_word_x.zip(last_word_x).is_some_and(|(first, last)| first < last) {
             ordered[start..last].reverse();
             changed = true;
         }
@@ -222,6 +230,12 @@ mod rtl_reorder_tests {
             ..TextSpan::default()
         };
         OrderedTextSpan::new(span, order)
+    }
+
+    fn structure_ordered(text: &str, x: f32, order: usize, mcid: u32) -> OrderedTextSpan {
+        let mut span = ordered(text, x, 700.0, order).span;
+        span.mcid = Some(mcid);
+        OrderedTextSpan::with_info(span, order, ReadingOrderInfo::structure_tree())
     }
 
     // Per-word RTL spans arrive in left-to-right reading order
@@ -254,5 +268,32 @@ mod rtl_reorder_tests {
         reorder_rtl_word_runs(&mut v);
         let texts: Vec<&str> = v.iter().map(|o| o.span.text.as_str()).collect();
         assert_eq!(texts, vec!["The", " ", "quick"]);
+    }
+
+    #[test]
+    fn reorder_rtl_word_runs_preserves_distinct_structure_mcids() {
+        let mut spans = vec![
+            structure_ordered("الحالة", 500.0, 0, 24),
+            structure_ordered("الرمز", 300.0, 1, 25),
+            structure_ordered("العدد", 100.0, 2, 26),
+        ];
+
+        reorder_rtl_word_runs(&mut spans);
+
+        let texts: Vec<&str> = spans.iter().map(|span| span.span.text.as_str()).collect();
+        assert_eq!(texts, ["الحالة", "الرمز", "العدد"]);
+    }
+
+    #[test]
+    fn reorder_rtl_word_runs_reverses_fragments_within_one_structure_mcid() {
+        let mut spans = vec![
+            structure_ordered("הבדיקה", 100.0, 0, 14),
+            structure_ordered("שלבי", 300.0, 1, 14),
+        ];
+
+        reorder_rtl_word_runs(&mut spans);
+
+        let texts: Vec<&str> = spans.iter().map(|span| span.span.text.as_str()).collect();
+        assert_eq!(texts, ["שלבי", "הבדיקה"]);
     }
 }

@@ -42,6 +42,36 @@ const SPARSE_IMAGE_OCR_FALLBACK_PSM: i32 = 3;
     not(target_arch = "wasm32"),
     any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
 ))]
+const RTL_SPARSE_IMAGE_OCR_UNIQUE_TOKEN_LIMIT: usize = 32;
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+const RTL_SPARSE_IMAGE_OCR_TOTAL_TOKEN_LIMIT: usize = 48;
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+const RTL_SPARSE_IMAGE_OCR_FALLBACK_PSM: i32 = 6;
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+const RTL_SPARSE_IMAGE_OCR_MAX_CONFIDENCE_DROP: f64 = 0.10;
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+const RTL_SPARSE_IMAGE_OCR_MIN_PRIMARY_TOKEN_RETENTION: f64 = 0.80;
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
 const SPARSE_IMAGE_OCR_MIN_WORD_CONFIDENCE: f64 = 0.30;
 
 #[cfg(all(
@@ -1374,6 +1404,428 @@ fn sparse_image_ocr_fallback_config(
     fallback_config
 }
 
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn is_implicit_strong_rtl_tesseract(config: &crate::core::config::OcrConfig) -> bool {
+    is_implicit_horizontal_tesseract(config)
+        && config
+            .effective_tesseract_language()
+            .iter()
+            .any(|language| crate::core::config::ocr::is_strong_rtl_tesseract_language(language))
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn rtl_sparse_image_ocr_fallback_config(
+    whole_image_config: &crate::core::config::OcrConfig,
+) -> crate::core::config::OcrConfig {
+    let mut fallback_config = whole_image_config.clone();
+    fallback_config.tesseract_config.get_or_insert_default().psm = Some(RTL_SPARSE_IMAGE_OCR_FALLBACK_PSM);
+    fallback_config
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn is_strong_rtl_letter(character: char) -> bool {
+    character.is_alphabetic()
+        && matches!(
+            character as u32,
+            0x0590..=0x05ff | 0x0600..=0x06ff | 0x0750..=0x077f | 0x08a0..=0x08ff
+                | 0xfb1d..=0xfdff | 0xfe70..=0xfeff
+        )
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn normalized_ocr_tokens(content: &str) -> Vec<String> {
+    content
+        .split_whitespace()
+        .filter_map(|token| {
+            let normalized = token
+                .trim_matches(|character: char| !character.is_alphanumeric() && !":/_@.-".contains(character))
+                .to_lowercase();
+            (!normalized.is_empty()).then_some(normalized)
+        })
+        .collect()
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn normalized_identifier_slot(token: &str) -> Option<String> {
+    let token = token.trim_matches(|character: char| !character.is_alphanumeric());
+    let characters = token.chars().collect::<Vec<_>>();
+    let leading_digits = characters.iter().take_while(|character| character.is_numeric()).count();
+    let attached_rtl_list_item = (1..=2).contains(&leading_digits)
+        && characters
+            .get(leading_digits)
+            .is_some_and(|character| matches!(*character, '.' | ')'))
+        && characters
+            .get(leading_digits + 1)
+            .is_some_and(|character| character.is_alphabetic())
+        && characters[leading_digits + 1..]
+            .iter()
+            .any(|character| is_strong_rtl_letter(*character));
+    if attached_rtl_list_item {
+        return None;
+    }
+    let alphanumeric = characters
+        .iter()
+        .filter(|character| character.is_alphanumeric())
+        .count();
+    if alphanumeric < 3 || token.contains('\u{fffd}') {
+        return None;
+    }
+    let has_internal_separator = characters.iter().enumerate().any(|(index, character)| {
+        !character.is_alphanumeric()
+            && characters[..index].iter().any(|character| character.is_alphanumeric())
+            && characters[index + 1..]
+                .iter()
+                .any(|character| character.is_alphanumeric())
+    });
+    let digits = characters.iter().filter(|character| character.is_ascii_digit()).count();
+    let letters = characters
+        .iter()
+        .filter(|character| character.is_ascii_alphabetic())
+        .count();
+    let is_long_numeric = digits >= 4 && letters == 0;
+    let is_compact_identifier = digits > 0 && letters > 0 && alphanumeric >= 6;
+    (has_internal_separator || is_long_numeric || is_compact_identifier).then(|| token.to_lowercase())
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn identifier_slot_shape(token: &str) -> String {
+    let mut shape = String::new();
+    let mut previous_class = None;
+    for character in token.chars() {
+        let class = if character.is_alphabetic() {
+            Some('a')
+        } else if character.is_numeric() {
+            Some('0')
+        } else {
+            None
+        };
+        if let Some(class) = class {
+            if previous_class != Some(class) {
+                shape.push(class);
+            }
+            previous_class = Some(class);
+        } else {
+            shape.push(character);
+            previous_class = None;
+        }
+    }
+    shape
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn normalized_edit_distance(left: &str, right: &str) -> usize {
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    for (left_index, left_character) in left.chars().enumerate() {
+        let mut current = Vec::with_capacity(right.len() + 1);
+        current.push(left_index + 1);
+        for (right_index, right_character) in right.iter().enumerate() {
+            current.push(std::cmp::min(
+                std::cmp::min(current[right_index] + 1, previous[right_index + 1] + 1),
+                previous[right_index] + usize::from(left_character != *right_character),
+            ));
+        }
+        previous = current;
+    }
+    previous[right.len()]
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn identifier_slots(content: &str) -> Vec<String> {
+    content
+        .split_whitespace()
+        .filter_map(normalized_identifier_slot)
+        .collect()
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn identifier_slots_are_preserved(primary: &str, candidate: &str) -> bool {
+    fn compatible(primary: &str, candidate: &str) -> bool {
+        if identifier_slot_shape(primary) != identifier_slot_shape(candidate) {
+            return false;
+        }
+        let length = primary.chars().count().max(candidate.chars().count());
+        normalized_edit_distance(primary, candidate) <= length.div_ceil(5).clamp(1, 2)
+    }
+
+    fn assign(
+        primary_index: usize,
+        compatibility: &[Vec<bool>],
+        seen: &mut [bool],
+        candidate_owner: &mut [Option<usize>],
+    ) -> bool {
+        for candidate_index in 0..candidate_owner.len() {
+            if !compatibility[primary_index][candidate_index] || seen[candidate_index] {
+                continue;
+            }
+            seen[candidate_index] = true;
+            let owner = candidate_owner[candidate_index];
+            if owner.is_none() || assign(owner.expect("checked as present"), compatibility, seen, candidate_owner) {
+                candidate_owner[candidate_index] = Some(primary_index);
+                return true;
+            }
+        }
+        false
+    }
+
+    let primary = identifier_slots(primary);
+    let candidate = identifier_slots(candidate);
+    if primary.len() != candidate.len() {
+        return false;
+    }
+    let compatibility = primary
+        .iter()
+        .map(|primary| {
+            candidate
+                .iter()
+                .map(|candidate| compatible(primary, candidate))
+                .collect()
+        })
+        .collect::<Vec<Vec<_>>>();
+    let mut candidate_owner = vec![None; candidate.len()];
+    (0..primary.len()).all(|primary_index| {
+        let mut seen = vec![false; candidate.len()];
+        assign(primary_index, &compatibility, &mut seen, &mut candidate_owner)
+    })
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn normalized_tesseract_mean_confidence(result: &crate::types::ExtractedDocument) -> Option<f64> {
+    if let Some(value) = result.metadata.additional.get("mean_text_conf")
+        && let Some(confidence) = value
+            .as_f64()
+            .or_else(|| value.as_i64().map(|value| value as f64))
+            .or_else(|| value.as_u64().map(|value| value as f64))
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+    {
+        return Some(confidence / 100.0);
+    }
+
+    let confidences = usable_word_confidences(result)
+        .into_iter()
+        .filter(|confidence| (0.0..=1.0).contains(confidence))
+        .collect::<Vec<_>>();
+    (!confidences.is_empty()).then(|| confidences.iter().sum::<f64>() / confidences.len() as f64)
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn has_new_pathological_line_repetition(primary: &str, candidate: &str) -> bool {
+    fn lines(content: &str) -> std::collections::HashMap<String, usize> {
+        let mut counts = std::collections::HashMap::new();
+        for line in content.lines().filter_map(|line| {
+            let normalized = normalized_ocr_tokens(line).join(" ");
+            (!normalized.is_empty()).then_some(normalized)
+        }) {
+            *counts.entry(line).or_default() += 1;
+        }
+        counts
+    }
+
+    let primary_lines = lines(primary);
+    lines(candidate)
+        .into_iter()
+        .any(|(line, count)| count >= 3 && count > primary_lines.get(&line).copied().unwrap_or_default())
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn has_new_pathological_trigram_repetition(primary: &str, candidate: &str) -> bool {
+    fn trigrams(content: &str) -> std::collections::HashMap<[String; 3], usize> {
+        let mut counts = std::collections::HashMap::new();
+        for line in content.lines() {
+            let tokens = normalized_ocr_tokens(line);
+            for words in tokens.windows(3) {
+                *counts
+                    .entry([words[0].clone(), words[1].clone(), words[2].clone()])
+                    .or_default() += 1;
+            }
+        }
+        counts
+    }
+
+    let primary_trigrams = trigrams(primary);
+    trigrams(candidate)
+        .into_iter()
+        .any(|(trigram, count)| count >= 3 && count > primary_trigrams.get(&trigram).copied().unwrap_or_default())
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn rtl_retry_candidate_improves(
+    primary: &crate::types::ExtractedDocument,
+    candidate: &crate::types::ExtractedDocument,
+) -> bool {
+    let primary_tokens = normalized_ocr_tokens(&primary.content);
+    let candidate_tokens = normalized_ocr_tokens(&candidate.content);
+    let primary_unique = primary_tokens.iter().collect::<std::collections::HashSet<_>>();
+    let candidate_unique = candidate_tokens.iter().collect::<std::collections::HashSet<_>>();
+    let primary_rtl = primary_unique
+        .iter()
+        .filter(|token| token.chars().any(is_strong_rtl_letter))
+        .count();
+    let candidate_rtl = candidate_unique
+        .iter()
+        .filter(|token| token.chars().any(is_strong_rtl_letter))
+        .count();
+    let retained_primary = primary_unique.intersection(&candidate_unique).count();
+    let primary_retention = if primary_unique.is_empty() {
+        1.0
+    } else {
+        retained_primary as f64 / primary_unique.len() as f64
+    };
+    if candidate_rtl <= primary_rtl
+        || candidate_unique.len() < primary_unique.len()
+        || primary_retention < RTL_SPARSE_IMAGE_OCR_MIN_PRIMARY_TOKEN_RETENTION
+    {
+        return false;
+    }
+
+    if !identifier_slots_are_preserved(&primary.content, &candidate.content) {
+        return false;
+    }
+    if has_new_pathological_line_repetition(&primary.content, &candidate.content)
+        || has_new_pathological_trigram_repetition(&primary.content, &candidate.content)
+    {
+        return false;
+    }
+
+    match (
+        normalized_tesseract_mean_confidence(primary),
+        normalized_tesseract_mean_confidence(candidate),
+    ) {
+        (Some(primary), Some(candidate)) => candidate + RTL_SPARSE_IMAGE_OCR_MAX_CONFIDENCE_DROP >= primary,
+        (Some(_), None) => false,
+        _ => true,
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn merge_primary_warnings_into_selected(
+    primary: &crate::types::ExtractedDocument,
+    selected: &mut crate::types::ExtractedDocument,
+) {
+    let selected_warnings = std::mem::take(&mut selected.processing_warnings);
+    selected.processing_warnings = primary.processing_warnings.clone();
+    for warning in selected_warnings {
+        crate::core::diagnostics::push_warning_deduped(&mut selected.processing_warnings, warning);
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+fn should_retry_sparse_rtl_ocr(
+    original_config: &crate::core::config::OcrConfig,
+    effective_config: &crate::core::config::OcrConfig,
+    primary: &crate::types::ExtractedDocument,
+) -> bool {
+    let tokens = normalized_ocr_tokens(&primary.content);
+    let unique_tokens = tokens.iter().collect::<std::collections::HashSet<_>>().len();
+    is_implicit_strong_rtl_tesseract(original_config)
+        && effective_config.tesseract_config.as_ref().and_then(|config| config.psm) == Some(WHOLE_IMAGE_TESSERACT_PSM)
+        && unique_tokens <= RTL_SPARSE_IMAGE_OCR_UNIQUE_TOKEN_LIMIT
+        && tokens.len() <= RTL_SPARSE_IMAGE_OCR_TOTAL_TOKEN_LIMIT
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
+))]
+pub(crate) async fn process_whole_image_ocr_with_sparse_retry(
+    backend: &std::sync::Arc<dyn crate::plugins::OcrBackend>,
+    image_bytes: std::sync::Arc<Vec<u8>>,
+    original_config: &crate::core::config::OcrConfig,
+    effective_config: &crate::core::config::OcrConfig,
+    whole_page_raster: bool,
+    allow_standard_retry: bool,
+    cancel_token: Option<&crate::cancellation::CancellationToken>,
+) -> crate::Result<crate::types::ExtractedDocument> {
+    if cancel_token.is_some_and(crate::cancellation::CancellationToken::is_cancelled) {
+        return Err(crate::XbergError::Cancelled);
+    }
+    let primary = backend
+        .process_image_owned(std::sync::Arc::clone(&image_bytes), effective_config)
+        .await?;
+    if !whole_page_raster {
+        return Ok(primary);
+    }
+
+    let rtl_retry = should_retry_sparse_rtl_ocr(original_config, effective_config, &primary);
+    let standard_retry = allow_standard_retry && !rtl_retry && should_retry_sparse_image_ocr(original_config, &primary);
+    if !rtl_retry && !standard_retry {
+        return Ok(primary);
+    }
+    if cancel_token.is_some_and(crate::cancellation::CancellationToken::is_cancelled) {
+        return Err(crate::XbergError::Cancelled);
+    }
+
+    let fallback_config = if rtl_retry {
+        rtl_sparse_image_ocr_fallback_config(effective_config)
+    } else {
+        sparse_image_ocr_fallback_config(effective_config)
+    };
+    let fallback = match backend.process_image_owned(image_bytes, &fallback_config).await {
+        Ok(fallback) => fallback,
+        Err(error @ crate::XbergError::Cancelled) => return Err(error),
+        Err(error) => {
+            tracing::warn!(%error, "sparse whole-image OCR fallback failed");
+            return Ok(primary);
+        }
+    };
+    let select_fallback = if rtl_retry {
+        rtl_retry_candidate_improves(&primary, &fallback)
+    } else {
+        has_robust_word_confidence_distribution(&fallback)
+    };
+    if !select_fallback {
+        return Ok(primary);
+    }
+    let mut selected = fallback;
+    merge_primary_warnings_into_selected(&primary, &mut selected);
+    Ok(selected)
+}
+
 /// Resize/re-DPI raw image bytes for OCR using `ExtractionConfig::images`
 /// (`ImageExtractionConfig`) before handing them to an OCR backend.
 ///
@@ -1793,25 +2245,19 @@ impl ImageExtractor {
         #[cfg(not(feature = "ocr-pipeline"))]
         let ocr_input: &[u8] = content;
 
-        let ocr_result = backend.process_image(ocr_input, &ocr_config_with_format).await?;
         #[cfg(not(target_arch = "wasm32"))]
-        let ocr_result = {
-            let mut ocr_result = ocr_result;
-            if should_retry_sparse_image_ocr(ocr_config, &ocr_result) {
-                let fallback_config = sparse_image_ocr_fallback_config(&ocr_config_with_format);
-                match backend.process_image(ocr_input, &fallback_config).await {
-                    Ok(mut fallback_result) if has_robust_word_confidence_distribution(&fallback_result) => {
-                        let mut processing_warnings = ocr_result.processing_warnings.clone();
-                        processing_warnings.append(&mut fallback_result.processing_warnings);
-                        fallback_result.processing_warnings = processing_warnings;
-                        ocr_result = fallback_result;
-                    }
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(%error, "sparse standalone image OCR fallback failed"),
-                }
-            }
-            ocr_result
-        };
+        let ocr_result = process_whole_image_ocr_with_sparse_retry(
+            &backend,
+            std::sync::Arc::new(ocr_input.to_vec()),
+            ocr_config,
+            &ocr_config_with_format,
+            true,
+            true,
+            config.cancel_token.as_ref(),
+        )
+        .await?;
+        #[cfg(target_arch = "wasm32")]
+        let ocr_result = backend.process_image(ocr_input, &ocr_config_with_format).await?;
         #[cfg(feature = "ocr-pipeline")]
         let ocr_result = {
             let mut ocr_result = ocr_result;
@@ -3234,6 +3680,7 @@ mod tests {
 
         let tesseract_config = ocr_config
             .tesseract_config
+            .as_ref()
             .expect("whole-image OCR must materialize Tesseract configuration");
         assert_eq!(tesseract_config.psm, Some(VERTICAL_BLOCK_TESSERACT_PSM));
         assert_eq!(tesseract_config.language, vec!["jpn_vert"]);
@@ -3251,6 +3698,7 @@ mod tests {
 
         let tesseract_config = ocr_config
             .tesseract_config
+            .as_ref()
             .expect("whole-image OCR must materialize Tesseract configuration");
         assert_eq!(tesseract_config.psm, Some(WHOLE_IMAGE_TESSERACT_PSM));
         assert_eq!(tesseract_config.language, vec!["eng"]);
@@ -3271,7 +3719,10 @@ mod tests {
 
         apply_default_whole_image_tesseract_psm(&mut ocr_config);
 
-        let tesseract_config = ocr_config.tesseract_config.expect("explicit config must remain");
+        let tesseract_config = ocr_config
+            .tesseract_config
+            .as_ref()
+            .expect("explicit config must remain");
         assert_eq!(tesseract_config.psm, Some(4));
         assert_eq!(tesseract_config.language, vec!["jpn_vert"]);
     }
@@ -3440,6 +3891,18 @@ mod tests {
             }
         }
 
+        fn result_with_content_and_confidence(content: &str, confidence: f64) -> crate::types::ExtractedDocument {
+            let mut result = crate::types::ExtractedDocument {
+                content: content.to_string(),
+                ..Default::default()
+            };
+            result
+                .metadata
+                .additional
+                .insert("mean_text_conf".into(), serde_json::json!(confidence));
+            result
+        }
+
         #[test]
         fn should_retry_implicit_horizontal_tesseract_when_words_are_sparse() {
             let config = crate::core::config::OcrConfig::default();
@@ -3552,6 +4015,283 @@ mod tests {
             let preprocessing = tesseract_config.preprocessing.unwrap();
             assert!(!preprocessing.deskew);
             assert!(preprocessing.contrast_enhance);
+        }
+
+        #[test]
+        fn should_normalize_tesseract_metadata_confidence_from_zero_to_one() {
+            for (raw, expected) in [(0.0, 0.0), (1.0, 0.01), (91.0, 0.91), (100.0, 1.0)] {
+                let result = result_with_content_and_confidence("نص", raw);
+                assert_eq!(normalized_tesseract_mean_confidence(&result), Some(expected));
+            }
+        }
+
+        #[test]
+        fn should_select_rtl_retry_only_when_grounded_tokens_increase() {
+            let primary = result_with_content_and_confidence("تقرير عربي REQ-2026-104 42", 91.0);
+            let candidate = result_with_content_and_confidence("تقرير عربي كامل REQ-2026-104 42", 84.0);
+
+            assert!(rtl_retry_candidate_improves(&primary, &candidate));
+        }
+
+        #[test]
+        fn should_reject_rtl_retry_that_loses_or_duplicates_primary_identifiers() {
+            let primary = result_with_content_and_confidence("تقرير عربي REQ-2026-104 42", 91.0);
+            let lost = result_with_content_and_confidence("تقرير عربي كامل 42", 92.0);
+            let duplicated = result_with_content_and_confidence("تقرير عربي كامل REQ-2026-104 REQ-2026-104 42", 92.0);
+
+            assert!(!rtl_retry_candidate_improves(&primary, &lost));
+            assert!(!rtl_retry_candidate_improves(&primary, &duplicated));
+        }
+
+        #[test]
+        fn should_match_identifier_slots_with_close_ocr_substitution() {
+            assert!(identifier_slots_are_preserved(
+                "طلب REQ-2026-104 OCR-v2.1",
+                "1. طلب REO-2026-104 OCR-v2.1 42"
+            ));
+            assert!(!identifier_slots_are_preserved(
+                "طلب REQ-2026-104 OCR-v2.1",
+                "طلب OCR-v2.1"
+            ));
+            assert!(!identifier_slots_are_preserved(
+                "طلب REQ-2026-104 OCR-v2.1",
+                "طلب REO-2026-104 REO-2026-104 OCR-v2.1"
+            ));
+            assert_eq!(
+                identifier_slots("1.افتح 3.احتفظ REQ-2026-104 1,250.75 2026"),
+                ["req-2026-104", "1,250.75", "2026"]
+            );
+        }
+
+        #[test]
+        fn should_reject_longer_rtl_retry_with_repeated_lines_or_low_confidence() {
+            let primary = result_with_content_and_confidence("تقرير عربي REQ-2026-104", 91.0);
+            let repeated =
+                result_with_content_and_confidence("تقرير عربي REQ-2026-104\nكلام زائد\nكلام زائد\nكلام زائد", 92.0);
+            let repeated_phrase = result_with_content_and_confidence(
+                "تقرير عربي REQ-2026-104 كلام زائد جدا كلام زائد جدا كلام زائد جدا",
+                92.0,
+            );
+            let low_confidence = result_with_content_and_confidence("تقرير عربي كامل REQ-2026-104", 80.0);
+
+            assert!(!rtl_retry_candidate_improves(&primary, &repeated));
+            assert!(!rtl_retry_candidate_improves(&primary, &repeated_phrase));
+            assert!(!rtl_retry_candidate_improves(&primary, &low_confidence));
+        }
+
+        #[test]
+        fn should_reject_rtl_retry_that_replaces_too_many_primary_tokens() {
+            let primary =
+                result_with_content_and_confidence("واحد اثنان ثلاثة أربعة خمسة ستة سبعة ثمانية تسعة عشرة", 91.0);
+            let candidate =
+                result_with_content_and_confidence("واحد اثنان ثلاثة أربعة خمسة ستة سبعة جديد إضافي كامل مفيد", 92.0);
+
+            assert!(!rtl_retry_candidate_improves(&primary, &candidate));
+        }
+
+        #[test]
+        fn should_bound_rtl_retry_by_unique_and_total_content_tokens() {
+            let original = crate::core::config::OcrConfig {
+                language: vec!["ara".to_string()],
+                ..Default::default()
+            };
+            let mut effective = original.clone();
+            apply_default_whole_image_tesseract_psm(&mut effective);
+            for (unique, total, expected) in [(32, 48, true), (33, 33, false), (32, 49, false)] {
+                let tokens = (0..total)
+                    .map(|index| format!("كلمة{}", index % unique))
+                    .collect::<Vec<_>>();
+                let primary = crate::types::ExtractedDocument {
+                    content: tokens.join(" "),
+                    ..Default::default()
+                };
+                assert_eq!(should_retry_sparse_rtl_ocr(&original, &effective, &primary), expected);
+            }
+        }
+
+        #[test]
+        fn should_retry_only_implicit_strong_rtl_tesseract_with_psm11_primary() {
+            let implicit_arabic = crate::core::config::OcrConfig {
+                language: vec!["ara".to_string()],
+                ..Default::default()
+            };
+            let explicit_arabic = crate::core::config::OcrConfig {
+                language: vec!["ara".to_string()],
+                tesseract_config: Some(crate::types::TesseractConfig {
+                    psm: Some(11),
+                    language: vec!["ara".to_string()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let implicit_english = crate::core::config::OcrConfig::default();
+
+            assert!(is_implicit_strong_rtl_tesseract(&implicit_arabic));
+            assert!(!is_implicit_strong_rtl_tesseract(&explicit_arabic));
+            assert!(!is_implicit_strong_rtl_tesseract(&implicit_english));
+        }
+
+        #[cfg(feature = "ocr")]
+        #[tokio::test]
+        #[ignore = "requires local Tesseract Arabic and Hebrew traineddata"]
+        async fn should_improve_arabic_and_preserve_hebrew_ground_truth_coverage() {
+            use crate::plugins::OcrBackend;
+
+            fn correct_token_count(actual: &str, expected: &str) -> usize {
+                let actual = normalized_ocr_tokens(actual)
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>();
+                normalized_ocr_tokens(expected)
+                    .into_iter()
+                    .filter(|token| actual.contains(token))
+                    .count()
+            }
+
+            let backend: std::sync::Arc<dyn OcrBackend> =
+                std::sync::Arc::new(crate::ocr::tesseract_backend::TesseractBackend::new());
+            let mut executed = 0;
+            for (language, image_path, ground_truth_path, strict_improvement) in [
+                (
+                    "ara",
+                    "images/rtl_arabic_300dpi.png",
+                    "ground_truth/images/rtl_arabic_300dpi.txt",
+                    true,
+                ),
+                (
+                    "heb",
+                    "images/rtl_hebrew_300dpi.png",
+                    "ground_truth/images/rtl_hebrew_300dpi.txt",
+                    false,
+                ),
+            ] {
+                let image = crate::utils::read_test_fixture(image_path).expect("required RTL image fixture is missing");
+                let ground_truth = crate::utils::read_test_fixture(ground_truth_path)
+                    .expect("required RTL ground-truth fixture is missing");
+                let ground_truth = String::from_utf8(ground_truth).expect("ground truth must be UTF-8");
+                let original = crate::core::config::OcrConfig {
+                    language: vec![language.to_string()],
+                    tesseract_config: Some(crate::types::TesseractConfig {
+                        language: vec![language.to_string()],
+                        use_cache: false,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut effective = original.clone();
+                apply_default_whole_image_tesseract_psm(&mut effective);
+                enable_image_ocr_elements(&mut effective, true);
+                let image = std::sync::Arc::new(image);
+                let baseline_started = std::time::Instant::now();
+                let baseline = backend
+                    .process_image_owned(std::sync::Arc::clone(&image), &effective)
+                    .await
+                    .expect("PSM 11 baseline must complete");
+                let baseline_elapsed = baseline_started.elapsed();
+                let psm6_config = rtl_sparse_image_ocr_fallback_config(&effective);
+                let psm6_started = std::time::Instant::now();
+                let psm6 = backend
+                    .process_image_owned(std::sync::Arc::clone(&image), &psm6_config)
+                    .await
+                    .expect("PSM 6 candidate must complete");
+                let psm6_elapsed = psm6_started.elapsed();
+                let selected_started = std::time::Instant::now();
+                let selected = process_whole_image_ocr_with_sparse_retry(
+                    &backend, image, &original, &effective, true, false, None,
+                )
+                .await
+                .expect("RTL sparse retry must complete");
+                let selected_elapsed = selected_started.elapsed();
+                let baseline_correct = correct_token_count(&baseline.content, &ground_truth);
+                let psm6_correct = correct_token_count(&psm6.content, &ground_truth);
+                let selected_correct = correct_token_count(&selected.content, &ground_truth);
+                let expected_identifiers = ["REQ-2026-104", "OCR-v2.1", "A-17", "B-09"];
+                let baseline_exact_identifiers = expected_identifiers
+                    .iter()
+                    .filter(|identifier| baseline.content.contains(*identifier))
+                    .count();
+                let psm6_exact_identifiers = expected_identifiers
+                    .iter()
+                    .filter(|identifier| psm6.content.contains(*identifier))
+                    .count();
+                let selected_exact_identifiers = expected_identifiers
+                    .iter()
+                    .filter(|identifier| selected.content.contains(*identifier))
+                    .count();
+                let baseline_tokens = normalized_ocr_tokens(&baseline.content);
+                let psm6_tokens = normalized_ocr_tokens(&psm6.content);
+                let baseline_unique = baseline_tokens.iter().collect::<std::collections::HashSet<_>>();
+                let psm6_unique = psm6_tokens.iter().collect::<std::collections::HashSet<_>>();
+                let baseline_rtl = baseline_unique
+                    .iter()
+                    .filter(|token| token.chars().any(is_strong_rtl_letter))
+                    .count();
+                let psm6_rtl = psm6_unique
+                    .iter()
+                    .filter(|token| token.chars().any(is_strong_rtl_letter))
+                    .count();
+                let retention =
+                    baseline_unique.intersection(&psm6_unique).count() as f64 / baseline_unique.len() as f64;
+                let confidence_ok = match (
+                    normalized_tesseract_mean_confidence(&baseline),
+                    normalized_tesseract_mean_confidence(&psm6),
+                ) {
+                    (Some(primary), Some(candidate)) => candidate + RTL_SPARSE_IMAGE_OCR_MAX_CONFIDENCE_DROP >= primary,
+                    (Some(_), None) => false,
+                    _ => true,
+                };
+                let baseline_slots = identifier_slots(&baseline.content);
+                let psm6_slots = identifier_slots(&psm6.content);
+                let selected_slots = identifier_slots(&selected.content);
+                let selected_unique_slots = selected_slots.iter().collect::<std::collections::HashSet<_>>();
+                eprintln!(
+                    "{language}: correct_tokens={baseline_correct}->{psm6_correct}->{selected_correct}, exact_gt_identifiers={baseline_exact_identifiers}->{psm6_exact_identifiers}->{selected_exact_identifiers}/{}, psm={:?}, latency_ms={:.1}/{:.1}/{:.1}, normalized_tokens={}->{},should_retry:{}, predicates=rtl_gain:{},total_unique:{},retention:{retention:.3},confidence:{confidence_ok},line_repeat:{},trigram_repeat:{},slots:{}, slots={baseline_slots:?}->{psm6_slots:?}",
+                    expected_identifiers.len(),
+                    selected.metadata.additional.get("psm"),
+                    baseline_elapsed.as_secs_f64() * 1000.0,
+                    psm6_elapsed.as_secs_f64() * 1000.0,
+                    selected_elapsed.as_secs_f64() * 1000.0,
+                    baseline_tokens.len(),
+                    psm6_tokens.len(),
+                    should_retry_sparse_rtl_ocr(&original, &effective, &baseline),
+                    psm6_rtl > baseline_rtl,
+                    psm6_unique.len() >= baseline_unique.len(),
+                    has_new_pathological_line_repetition(&baseline.content, &psm6.content),
+                    has_new_pathological_trigram_repetition(&baseline.content, &psm6.content),
+                    identifier_slots_are_preserved(&baseline.content, &psm6.content),
+                );
+
+                assert!(
+                    baseline_correct > 0,
+                    "{language} baseline assertion must be non-vacuous"
+                );
+                if strict_improvement {
+                    assert!(
+                        selected_correct > baseline_correct,
+                        "Arabic correct-token count must improve"
+                    );
+                    assert_eq!(
+                        selected
+                            .metadata
+                            .additional
+                            .get("psm")
+                            .and_then(serde_json::Value::as_str),
+                        Some("6"),
+                        "Arabic improvement must come from the PSM 6 retry"
+                    );
+                } else {
+                    assert!(
+                        selected_correct >= baseline_correct,
+                        "Hebrew correct-token count must not regress"
+                    );
+                }
+                assert_eq!(
+                    selected_slots.len(),
+                    selected_unique_slots.len(),
+                    "selected OCR must not duplicate structural identifier slots"
+                );
+                executed += 1;
+            }
+            assert_eq!(executed, 2, "both grounded RTL fixture cases must execute");
         }
 
         /// Regression test for the standalone-image-OCR variant of the `TesseractConfig`

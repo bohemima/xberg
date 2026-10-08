@@ -858,6 +858,84 @@ pub(crate) fn reconstruct_table_with_columns(
     (remove_empty_rows_and_columns(result), kept_col_positions)
 }
 
+fn is_rtl_letter(character: char) -> bool {
+    character.is_alphabetic()
+        && matches!(character,
+            '\u{0590}'..='\u{08ff}' | '\u{fb1d}'..='\u{fdff}' | '\u{fe70}'..='\u{feff}')
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectionVote {
+    Rtl,
+    Ltr,
+    Neutral,
+}
+
+fn direction_vote(text: &str) -> DirectionVote {
+    if text.chars().any(is_rtl_letter) {
+        return DirectionVote::Rtl;
+    }
+    let has_latin = text.chars().any(|character| character.is_ascii_alphabetic());
+    if !has_latin {
+        return DirectionVote::Neutral;
+    }
+    let lower = text.to_ascii_lowercase();
+    let identifier_like = text.chars().any(|character| character.is_ascii_digit())
+        || text.contains(['/', '\\', '@', '_'])
+        || text.contains("://")
+        || lower.starts_with("www.")
+        || (!text.contains(char::is_whitespace) && text.chars().count() > 20)
+        || (text.chars().filter(|character| character.is_ascii_alphabetic()).count() > 1
+            && text
+                .chars()
+                .filter(|character| character.is_ascii_alphabetic())
+                .all(|character| character.is_ascii_uppercase()));
+    if identifier_like {
+        DirectionVote::Neutral
+    } else {
+        DirectionVote::Ltr
+    }
+}
+
+pub(crate) fn hocr_words_are_rtl<'a>(words: impl Iterator<Item = &'a HocrWord>) -> bool {
+    let mut rtl_count = 0usize;
+    let mut ltr_count = 0usize;
+    let mut rtl_x = 0u64;
+    let mut ltr_x = 0u64;
+    for word in words {
+        match direction_vote(&word.text) {
+            DirectionVote::Rtl => {
+                rtl_count += 1;
+                rtl_x += word.left as u64;
+            }
+            DirectionVote::Ltr => {
+                ltr_count += 1;
+                ltr_x += word.left as u64;
+            }
+            DirectionVote::Neutral => {}
+        }
+    }
+    if rtl_count != ltr_count {
+        return rtl_count > ltr_count;
+    }
+    rtl_count > 0 && rtl_x * ltr_count as u64 > ltr_x * rtl_count as u64
+}
+
+#[cfg(any(feature = "ocr", test))]
+pub(crate) fn orient_table_for_reading_order(
+    table: &mut [Vec<String>],
+    column_positions: &mut [u32],
+    words: &[HocrWord],
+) {
+    if !hocr_words_are_rtl(words.iter()) || !column_positions.windows(2).all(|pair| pair[0] <= pair[1]) {
+        return;
+    }
+    for row in table {
+        row.reverse();
+    }
+    column_positions.reverse();
+}
+
 const MIN_HEADER_NEIGHBOR_SUPPORT: usize = 2;
 
 /// A header word can start left of the data values it labels and form a header-only x-track.
@@ -1050,7 +1128,11 @@ fn order_cell_words_in_reading_order(mut cell_words: Vec<&HocrWord>) -> Vec<&Hoc
     }
 
     for line in &mut lines {
-        line.sort_by_key(|word| word.left);
+        if hocr_words_are_rtl(line.iter().copied()) {
+            line.sort_by_key(|word| std::cmp::Reverse(word.left));
+        } else {
+            line.sort_by_key(|word| word.left);
+        }
     }
     lines.into_iter().flatten().collect()
 }
@@ -1651,6 +1733,73 @@ mod tests {
     fn median_of_no_values_is_zero() {
         assert_eq!(median_of(Vec::new()), 0);
         assert_eq!(median_word_height(&[]), 0);
+    }
+
+    #[test]
+    fn rtl_table_columns_and_cell_words_follow_logical_geometry() {
+        let words = vec![
+            word("כמות", 100, 0, 40, 20),
+            word("קוד", 200, 0, 40, 20),
+            word("מצב", 300, 0, 40, 20),
+            word("42", 100, 60, 40, 20),
+            word("REQ-2026-104", 200, 60, 80, 20),
+            word("מוכן", 300, 60, 40, 20),
+        ];
+
+        let (mut table, mut positions) = reconstruct_table_with_columns(&words, 20, 0.5);
+        orient_table_for_reading_order(&mut table, &mut positions, &words);
+
+        assert_eq!(table[0], ["מצב", "קוד", "כמות"]);
+        assert_eq!(table[1], ["מוכן", "REQ-2026-104", "42"]);
+        assert!(positions.windows(2).all(|pair| pair[0] > pair[1]));
+
+        let right = word("שלבי", 300, 120, 40, 20);
+        let left = word("הבדיקה", 240, 122, 50, 20);
+        let ordered = order_cell_words_in_reading_order(vec![&left, &right]);
+        assert_eq!(
+            ordered.iter().map(|word| word.text.as_str()).collect::<Vec<_>>(),
+            ["שלבי", "הבדיקה"]
+        );
+    }
+
+    #[test]
+    fn numeric_and_ltr_tables_keep_left_to_right_geometry() {
+        let words = vec![
+            word("17", 100, 0, 40, 20),
+            word("09", 200, 0, 40, 20),
+            word("42", 300, 0, 40, 20),
+            word("left", 100, 60, 40, 20),
+            word("middle", 200, 60, 50, 20),
+            word("right", 300, 60, 40, 20),
+        ];
+
+        let (mut table, mut positions) = reconstruct_table_with_columns(&words, 20, 0.5);
+        orient_table_for_reading_order(&mut table, &mut positions, &words);
+
+        assert_eq!(table[0], ["17", "09", "42"]);
+        assert_eq!(table[1], ["left", "middle", "right"]);
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn code_heavy_rtl_table_ignores_long_latin_identifiers_for_base_direction() {
+        let words = vec![
+            word("https://example.test/a/very/long/resource-name", 100, 0, 180, 20),
+            word("REQ-2026-104-ALPHA", 200, 60, 150, 20),
+            word("الحالة", 400, 0, 60, 20),
+        ];
+        let mut table = vec![vec![
+            "https://example.test/a/very/long/resource-name".to_string(),
+            "REQ-2026-104-ALPHA".to_string(),
+            "الحالة".to_string(),
+        ]];
+        let mut positions = vec![100, 200, 400];
+
+        orient_table_for_reading_order(&mut table, &mut positions, &words);
+
+        assert_eq!(table[0][0], "الحالة");
+        assert_eq!(table[0][2], "https://example.test/a/very/long/resource-name");
+        assert_eq!(positions, [400, 200, 100]);
     }
 
     #[test]

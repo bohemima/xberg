@@ -9,6 +9,10 @@ use crate::pipeline::{OrderedTextSpan, ReadingOrderInfo};
 
 use super::{ArticleThreadStrategy, ReadingOrderContext, ReadingOrderStrategy, XYCutStrategy};
 
+const MIN_COLUMN_SIDE_LINES: usize = 4;
+const COLUMN_LINE_PAIR_HEIGHT_RATIO: f32 = 1.25;
+const BASELINE_DEDUP_TOLERANCE: f32 = 2.0;
+
 /// Structure tree-based reading order strategy.
 ///
 /// This is the PDF-spec-compliant approach for Tagged PDFs (ISO 32000-1:2008
@@ -59,15 +63,36 @@ impl StructureTreeStrategy {
 ///    (a column-respecting order crosses columns only at bottom-of-one /
 ///    top-of-next transitions).
 fn mcid_order_zigzags_columns(spans: &[TextSpan], mcid_order: &[u32]) -> bool {
+    let rtl_characters = spans
+        .iter()
+        .flat_map(|span| span.text.chars())
+        .filter(|character| character.is_alphabetic() && crate::text::is_rtl_text(*character as u32))
+        .count();
+    let ltr_characters = spans
+        .iter()
+        .flat_map(|span| span.text.chars())
+        .filter(|character| character.is_alphabetic() && !crate::text::is_rtl_text(*character as u32))
+        .count();
+    let rtl_dominant = rtl_characters > ltr_characters;
     let mcid_to_idx: std::collections::HashMap<u32, usize> = spans
         .iter()
         .enumerate()
         .filter_map(|(i, s)| s.mcid.map(|m| (m, i)))
         .collect();
-    let ordered_x: Vec<f32> = mcid_order
+    let ordered_spans: Vec<&TextSpan> = mcid_order
         .iter()
         .filter_map(|m| mcid_to_idx.get(m))
-        .map(|&i| spans[i].bbox.x + spans[i].bbox.width * 0.5)
+        .map(|&i| &spans[i])
+        .collect();
+    let ordered_x: Vec<f32> = ordered_spans
+        .iter()
+        .map(|span| {
+            if rtl_dominant {
+                span.bbox.x + span.bbox.width
+            } else {
+                span.bbox.x
+            }
+        })
         .collect();
     if ordered_x.len() < 10 {
         return false;
@@ -103,6 +128,59 @@ fn mcid_order_zigzags_columns(spans: &[TextSpan], mcid_order: &[u32]) -> bool {
         .iter()
         .map(|&x| if x < largest_gap_at { 0 } else { 1 })
         .collect();
+    let left_support = columns.iter().filter(|&&column| column == 0).count();
+    let right_support = columns.len() - left_support;
+    if left_support < MIN_COLUMN_SIDE_LINES || right_support < MIN_COLUMN_SIDE_LINES {
+        return false;
+    }
+    let distinct_lines = |column: u8| {
+        let mut baselines: Vec<f32> = ordered_spans
+            .iter()
+            .zip(&columns)
+            .filter(|(_, candidate)| **candidate == column)
+            .map(|(span, _)| span.bbox.y)
+            .collect();
+        baselines.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
+        baselines.into_iter().fold(Vec::<f32>::new(), |mut lines, baseline| {
+            if lines
+                .last()
+                .is_none_or(|last| (baseline - last).abs() >= BASELINE_DEDUP_TOLERANCE)
+            {
+                lines.push(baseline);
+            }
+            lines
+        })
+    };
+    let left_lines = distinct_lines(0);
+    let right_lines = distinct_lines(1);
+    if left_lines.len() < MIN_COLUMN_SIDE_LINES || right_lines.len() < MIN_COLUMN_SIDE_LINES {
+        return false;
+    }
+    // Both sides of a real column gutter recur through the same vertical
+    // region. A compact table beside single-column prose can create two X
+    // clusters and many spans, but not four paired text lines. ~keep
+    let mut heights: Vec<f32> = ordered_spans.iter().map(|span| span.bbox.height).collect();
+    heights.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
+    let line_pair_tolerance = heights[heights.len() / 2].max(1.0) * COLUMN_LINE_PAIR_HEIGHT_RATIO;
+    let paired_left_lines = left_lines
+        .iter()
+        .filter(|left| {
+            right_lines
+                .iter()
+                .any(|right| (*left - right).abs() <= line_pair_tolerance)
+        })
+        .count();
+    let paired_right_lines = right_lines
+        .iter()
+        .filter(|right| {
+            left_lines
+                .iter()
+                .any(|left| (*right - left).abs() <= line_pair_tolerance)
+        })
+        .count();
+    if paired_left_lines < MIN_COLUMN_SIDE_LINES || paired_right_lines < MIN_COLUMN_SIDE_LINES {
+        return false;
+    }
 
     let crossings = columns.windows(2).filter(|w| w[0] != w[1]).count();
     // For proper column reading order: left-column finished, then a
@@ -349,5 +427,81 @@ mod tests {
         let ordered = strategy.apply(spans, &context).unwrap();
         assert_eq!(ordered[0].span.text, "StructOrder2");
         assert_eq!(ordered[1].span.text, "StructOrder1");
+    }
+
+    #[test]
+    fn rtl_ragged_lines_do_not_trigger_ltr_column_zigzag_rejection() {
+        let spans: Vec<_> = (0..12)
+            .map(|mcid| {
+                let x = 100.0 + (mcid % 4) as f32 * 80.0;
+                let mut span = make_span("עברית", x, 700.0 - mcid as f32 * 12.0, Some(mcid));
+                span.bbox.width = 550.0 - x;
+                span
+            })
+            .collect();
+        let order: Vec<u32> = (0..12).collect();
+
+        assert!(!mcid_order_zigzags_columns(&spans, &order));
+    }
+
+    #[test]
+    fn rtl_interleaved_columns_still_trigger_zigzag_rejection() {
+        let spans: Vec<_> = (0..12)
+            .map(|mcid| {
+                let right_edge = if mcid % 2 == 0 { 280.0 } else { 560.0 };
+                let mut span = make_span("עברית", right_edge - 120.0, 700.0 - mcid as f32 * 12.0, Some(mcid));
+                span.bbox.width = 120.0;
+                span
+            })
+            .collect();
+        let order: Vec<u32> = (0..12).collect();
+
+        assert!(mcid_order_zigzags_columns(&spans, &order));
+    }
+
+    #[test]
+    fn rtl_large_type_columns_allow_font_relative_baseline_misalignment() {
+        let spans: Vec<_> = (0..12)
+            .map(|mcid| {
+                let column = mcid % 2;
+                let row = mcid / 2;
+                let right_edge = if column == 0 { 280.0 } else { 560.0 };
+                let y = 700.0 - row as f32 * 48.0 - column as f32 * 22.0;
+                let mut span = make_span("עברית", right_edge - 120.0, y, Some(mcid));
+                span.bbox.width = 120.0;
+                span.bbox.height = 20.0;
+                span
+            })
+            .collect();
+        let order: Vec<u32> = (0..12).collect();
+
+        assert!(mcid_order_zigzags_columns(&spans, &order));
+    }
+
+    #[test]
+    fn ltr_interleaved_columns_still_trigger_zigzag_rejection() {
+        let spans: Vec<_> = (0..12)
+            .map(|mcid| {
+                let x = if mcid % 2 == 0 { 100.0 } else { 500.0 };
+                make_span("English", x, 700.0 - mcid as f32 * 12.0, Some(mcid))
+            })
+            .collect();
+        let order: Vec<u32> = (0..12).collect();
+
+        assert!(mcid_order_zigzags_columns(&spans, &order));
+    }
+
+    #[test]
+    fn incidental_rtl_text_does_not_disable_ltr_column_rejection() {
+        let mut spans: Vec<_> = (0..12)
+            .map(|mcid| {
+                let x = if mcid % 2 == 0 { 100.0 } else { 500.0 };
+                make_span("English prose", x, 700.0 - mcid as f32 * 12.0, Some(mcid))
+            })
+            .collect();
+        spans[0].text.push_str(" עברית");
+        let order: Vec<u32> = (0..12).collect();
+
+        assert!(mcid_order_zigzags_columns(&spans, &order));
     }
 }

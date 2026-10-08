@@ -800,7 +800,7 @@ fn append_span_separator(
     // Everything below runs in the pair's shared upright frame: identical to the
     // raw page axes when the pair is unrotated, axis-swapped when it is not.
     let (previous_start, previous_end) = upright_advance_extent(previous);
-    let (span_start, _) = upright_advance_extent(span);
+    let (span_start, span_end) = upright_advance_extent(span);
     let (previous_baseline, _) = upright_cross_extent(previous);
     let (span_baseline, _) = upright_cross_extent(span);
     let baseline_gap = (previous_baseline - span_baseline).abs();
@@ -833,7 +833,17 @@ fn append_span_separator(
 
     let effective_height = span.bbox.height.max(previous.bbox.height).max(span.font_size * 0.5);
     if baseline_gap < effective_height * 0.5 {
-        if span_start - previous_end > span.font_size * 0.15 {
+        let is_rtl_advance = span_start < previous_start
+            && (has_rtl_or_bidi_content(&previous.text)
+                || has_rtl_or_bidi_content(&span.text)
+                || previous.rtl_draw_logical
+                || span.rtl_draw_logical);
+        let visual_gap = if is_rtl_advance {
+            previous_start - span_end
+        } else {
+            span_start - previous_end
+        };
+        if visual_gap > span.font_size * 0.15 {
             text.push(' ');
         }
     } else if baseline_gap > paragraph_gap_threshold {
@@ -2526,7 +2536,9 @@ fn page_text_with_options_excluding_layers(
     excluded_layers: &std::collections::HashSet<String>,
 ) -> xberg_native_pdf::error::Result<xberg_native_pdf::layout::PageText> {
     if excluded_layers.is_empty() {
-        return doc.extract_page_text_with_options(page_index, ReadingOrder::ColumnAware);
+        let mut page = doc.extract_page_text_with_options(page_index, ReadingOrder::ColumnAware)?;
+        prefer_tagged_rtl_structure_order(doc, page_index, &mut page);
+        return Ok(page);
     }
 
     let spans = doc.extract_spans_filtered_with_reading_order(
@@ -2535,15 +2547,39 @@ fn page_text_with_options_excluding_layers(
         excluded_layers.clone(),
         Default::default(),
     )?;
-    let chars: Vec<xberg_native_pdf::layout::TextChar> = spans.iter().flat_map(|s| s.to_chars()).collect();
     let (_, _, page_width, page_height) = doc.get_page_media_box(page_index)?;
-
-    Ok(xberg_native_pdf::layout::PageText {
+    let mut page = xberg_native_pdf::layout::PageText {
+        chars: spans.iter().flat_map(|s| s.to_chars()).collect(),
         spans,
-        chars,
         page_width,
         page_height,
-    })
+    };
+    prefer_tagged_rtl_structure_order(doc, page_index, &mut page);
+    Ok(page)
+}
+
+fn prefer_tagged_rtl_structure_order(
+    doc: &xberg_native_pdf::PdfDocument,
+    page_index: usize,
+    page: &mut xberg_native_pdf::layout::PageText,
+) {
+    let has_rtl = page.spans.iter().any(|span| {
+        span.text
+            .chars()
+            .any(|character| xberg_native_pdf::text::is_rtl_text(character as u32))
+    });
+    if !has_rtl {
+        return;
+    }
+    let Ok(ordered) = xberg_native_pdf::pipeline::order_page_spans(doc, page_index, page.spans.clone()) else {
+        return;
+    };
+    if ordered.iter().any(|span| {
+        span.order_info.source == xberg_native_pdf::pipeline::ordered_span::ReadingOrderSource::StructureTree
+    }) {
+        page.spans = ordered.into_iter().map(|span| span.span).collect();
+        page.chars = page.spans.iter().flat_map(|span| span.to_chars()).collect();
+    }
 }
 
 fn page_vertical_bounds(doc: &xberg_native_pdf::PdfDocument, page_index: usize) -> Result<(f32, f32)> {
@@ -2735,6 +2771,85 @@ mod tests {
             font_size,
             ..TextSpan::default()
         }
+    }
+
+    fn extract_fixture_page(relative: &str) -> Option<String> {
+        let bytes = crate::utils::read_test_fixture(relative)?;
+        let document = xberg_native_pdf::PdfDocument::from_bytes(bytes).expect("RTL PDF fixture must parse");
+        Some(
+            extract_page_text_column_aware(
+                &document,
+                0,
+                &std::collections::HashSet::new(),
+                PageMarginFractions::default(),
+            )
+            .expect("RTL PDF fixture must extract")
+            .0,
+        )
+    }
+
+    #[test]
+    fn tagged_hebrew_page_uses_logical_structure_order() {
+        let Some(text) = extract_fixture_page("pdf/rtl_hebrew_native.pdf") else {
+            return;
+        };
+        let positions: Vec<_> = [
+            "דוח בדיקת חילוץ בעברית",
+            "מספר בקשה:",
+            "REQ-2026-104",
+            "OCR-v2.1",
+            "שלבי הבדיקה",
+            "מצב",
+        ]
+        .iter()
+        .map(|anchor| {
+            text.find(anchor)
+                .unwrap_or_else(|| panic!("missing {anchor:?} in {text:?}"))
+        })
+        .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "wrong logical order: {text:?}"
+        );
+    }
+
+    #[test]
+    fn tagged_arabic_page_uses_logical_structure_order() {
+        let Some(text) = extract_fixture_page("pdf/rtl_arabic_native.pdf") else {
+            return;
+        };
+        let positions: Vec<_> = ["تقرير", "رقم الطلب:", "REQ-2026-104", "OCR", "خطوات", "الحالة"]
+            .iter()
+            .map(|anchor| {
+                text.find(anchor)
+                    .unwrap_or_else(|| panic!("missing {anchor:?} in {text:?}"))
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "wrong logical order: {text:?}"
+        );
+    }
+
+    #[test]
+    fn tagged_rtl_filtered_layer_path_uses_logical_structure_order() {
+        let Some(bytes) = crate::utils::read_test_fixture("pdf/rtl_hebrew_native.pdf") else {
+            return;
+        };
+        let document = xberg_native_pdf::PdfDocument::from_bytes(bytes).expect("RTL PDF fixture must parse");
+        let excluded = std::collections::HashSet::from(["absent-test-layer".to_string()]);
+        let page = page_text_with_options_excluding_layers(&document, 0, &excluded)
+            .expect("filtered RTL PDF fixture must extract");
+        let text = assemble_page_text(&page.spans);
+        let positions: Vec<_> = ["מספר בקשה:", "REQ-2026-104", "OCR-v2.1", "שלבי הבדיקה", "מצב"]
+            .iter()
+            .map(|anchor| {
+                text.find(anchor)
+                    .unwrap_or_else(|| panic!("missing {anchor:?} in {text:?}"))
+            })
+            .collect();
+
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
@@ -3112,6 +3227,17 @@ mod tests {
         let spans = vec![span_with_width("مرحبا", 500.0, 100.0, 30.0, 10.0, 10.0), next];
 
         assert_eq!(assemble_page_text(&spans), "مرحبا العالم");
+    }
+
+    #[test]
+    fn rtl_advance_separates_distinct_table_cells() {
+        let spans = vec![
+            span_with_width("الحالة", 500.0, 100.0, 40.0, 10.0, 10.0),
+            span_with_width("الرمز", 300.0, 100.0, 40.0, 10.0, 10.0),
+            span_with_width("العدد", 100.0, 100.0, 40.0, 10.0, 10.0),
+        ];
+
+        assert_eq!(assemble_page_text(&spans), "الحالة الرمز العدد");
     }
 
     #[test]

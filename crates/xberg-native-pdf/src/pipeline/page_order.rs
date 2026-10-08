@@ -66,6 +66,29 @@ fn page_reading_order_inner(
         return Ok(Vec::new());
     }
 
+    order_page_spans(doc, page_index, spans)
+}
+
+/// Apply the canonical page reading-order pipeline to spans already extracted
+/// from `page_index`.
+///
+/// This is equivalent to [`page_reading_order`] after extraction, and lets
+/// callers preserve span filters without parsing the page content a second time.
+/// Every span must originate from `doc` and the same `page_index`; mixing pages
+/// or documents produces undefined ordering semantics. <!-- ~keep -->
+///
+/// # Errors
+///
+/// Returns an error when page metadata or reading-order context cannot be read.
+pub fn order_page_spans(
+    doc: &PdfDocument,
+    page_index: usize,
+    spans: Vec<crate::layout::TextSpan>,
+) -> Result<Vec<OrderedTextSpan>> {
+    if spans.is_empty() {
+        return Ok(Vec::new());
+    }
+
     // Tier 1 (logical structure order) → Tier 2 (article threads) → Tier 3
     // (geometric). A sweep showed a bare ≥80%-bead-coverage gate
     // regressed single-column books (it reordered content non-improvingly), so

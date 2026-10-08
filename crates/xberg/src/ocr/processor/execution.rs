@@ -27,7 +27,8 @@ use crate::ocr::preprocessing::should_invert_for_polarity;
 use crate::ocr::table::post_process_table;
 use crate::ocr::table::{
     TableWords, drop_document_elements_claimed_by_tables, extract_table_words_from_tsv, extract_words_from_tsv,
-    reconstruct_table_with_columns, shading_mark_keep_mask, should_adopt_table_rebuild, table_to_markdown,
+    orient_table_for_reading_order, reconstruct_table_with_columns, shading_mark_keep_mask, should_adopt_table_rebuild,
+    table_to_markdown,
 };
 #[cfg(test)]
 use crate::ocr::types::BatchItemResult;
@@ -57,7 +58,7 @@ fn doc_orientation_detector() -> &'static crate::doc_orientation::DocOrientation
 
 use crate::table_core::{
     HocrWord, MIN_TABLE_CANDIDATE_WORDS, cluster_word_indices_into_table_regions, detect_rows,
-    drop_leading_caption_row, median_word_height, merge_disjoint_numeric_columns,
+    drop_leading_caption_row, hocr_words_are_rtl, median_word_height, merge_disjoint_numeric_columns,
 };
 use crate::types::OcrElement;
 
@@ -732,7 +733,7 @@ fn build_content_with_inline_tables(tsv_data: &str, tables: &[OcrTable], min_con
     }
 
     let mut sorted_words = non_table_words;
-    sorted_words.sort_by(|a, b| a.top.cmp(&b.top).then(a.left.cmp(&b.left)));
+    sorted_words.sort_by_key(|word| word.top + word.height / 2);
 
     let avg_height = if sorted_words.is_empty() {
         20
@@ -742,25 +743,31 @@ fn build_content_with_inline_tables(tsv_data: &str, tables: &[OcrTable], min_con
     };
     let line_threshold = avg_height / 2;
 
-    struct TextLine {
+    struct TextLine<'a> {
         y_center: u32,
-        text: String,
+        y_sum: u64,
+        words: Vec<&'a HocrWord>,
     }
 
     let mut lines: Vec<TextLine> = Vec::new();
-    for word in &sorted_words {
+    for word in sorted_words {
         let word_y = word.top + word.height / 2;
         if let Some(last_line) = lines.last_mut()
             && word_y.abs_diff(last_line.y_center) <= line_threshold
         {
-            last_line.text.push(' ');
-            last_line.text.push_str(&word.text);
+            last_line.words.push(word);
+            last_line.y_sum += word_y as u64;
+            last_line.y_center = (last_line.y_sum / last_line.words.len() as u64) as u32;
             continue;
         }
         lines.push(TextLine {
             y_center: word_y,
-            text: word.text.clone(),
+            y_sum: word_y as u64,
+            words: vec![word],
         });
+    }
+    for line in &mut lines {
+        sort_ocr_line_word_refs(&mut line.words);
     }
 
     let paragraph_gap = avg_height * 2;
@@ -776,14 +783,26 @@ fn build_content_with_inline_tables(tsv_data: &str, tables: &[OcrTable], min_con
             let last_y = last_para.y_start;
             if line.y_center.saturating_sub(last_y) <= paragraph_gap {
                 last_para.text.push('\n');
-                last_para.text.push_str(&line.text);
+                last_para.text.push_str(
+                    &line
+                        .words
+                        .iter()
+                        .map(|word| word.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
                 last_para.y_start = line.y_center;
                 continue;
             }
         }
         paragraphs.push(Paragraph {
             y_start: line.y_center,
-            text: line.text.clone(),
+            text: line
+                .words
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
         });
     }
 
@@ -1704,6 +1723,29 @@ fn reconstruct_cleaned_table(words: &[HocrWord], config: &TesseractConfig) -> (V
     (table, column_positions)
 }
 
+#[cfg(test)]
+fn sort_ocr_line_words(words: &mut [HocrWord]) {
+    let rtl_line = hocr_words_are_rtl(words.iter());
+    words.sort_by(|a, b| {
+        if rtl_line {
+            b.left.cmp(&a.left)
+        } else {
+            a.left.cmp(&b.left)
+        }
+    });
+}
+
+fn sort_ocr_line_word_refs(words: &mut [&HocrWord]) {
+    let rtl_line = hocr_words_are_rtl(words.iter().copied());
+    words.sort_by(|a, b| {
+        if rtl_line {
+            b.left.cmp(&a.left)
+        } else {
+            a.left.cmp(&b.left)
+        }
+    });
+}
+
 fn security_limits_for_ocr(
     tesseract_config: &TesseractConfig,
     extraction_config: Option<&ExtractionConfig>,
@@ -2325,7 +2367,7 @@ pub(super) fn perform_ocr(
                 .take(200)
                 .collect();
 
-            let (mut table, column_positions) = reconstruct_cleaned_table(&region.words, config);
+            let (mut table, mut column_positions) = reconstruct_cleaned_table(&region.words, config);
             let retry_region = if let Some((quantity_column, blank_row)) = quantity_retry_column_index(&table) {
                 let row_positions = detect_rows(&region.words, config.table_row_threshold_ratio);
                 if row_positions.len() == table.len() {
@@ -2362,9 +2404,9 @@ pub(super) fn perform_ocr(
                 });
             if let Some(recovered) = recovered {
                 region.push(recovered);
-                table = reconstruct_cleaned_table(&region.words, config).0;
+                (table, column_positions) = reconstruct_cleaned_table(&region.words, config);
             }
-
+            orient_table_for_reading_order(&mut table, &mut column_positions, &region.words);
             tracing::debug!(
                 target: "xberg::ocr::tables",
                 region_index,
@@ -2726,6 +2768,102 @@ mod tests {
     use crate::table_core::cluster_words_into_table_regions;
     use serial_test::serial;
     use tempfile::tempdir;
+
+    #[test]
+    fn ocr_line_sort_uses_each_lines_direction_and_preserves_identifiers() {
+        let word = |text: &str, left| HocrWord {
+            text: text.to_string(),
+            left,
+            top: 0,
+            width: 40,
+            height: 20,
+            confidence: 95.0,
+        };
+        let mut rtl = vec![word("כמות", 100), word("REQ-2026-104", 200), word("מצב", 300)];
+        let mut ltr = vec![word("world", 300), word("שלום", 200), word("hello", 100)];
+        let mut numeric = vec![word("42", 300), word("17", 100), word("09", 200)];
+        let mut rtl_with_url = vec![
+            word("https://example.test/a/very/long/resource-name", 100),
+            word("الحالة", 300),
+        ];
+        let mut rtl_edge_tie = vec![word("status", 100), word("الحالة", 300)];
+        let mut ltr_edge_tie = vec![word("الحالة", 100), word("status", 300)];
+
+        sort_ocr_line_words(&mut rtl);
+        sort_ocr_line_words(&mut ltr);
+        sort_ocr_line_words(&mut numeric);
+        sort_ocr_line_words(&mut rtl_with_url);
+        sort_ocr_line_words(&mut rtl_edge_tie);
+        sort_ocr_line_words(&mut ltr_edge_tie);
+
+        assert_eq!(
+            rtl.iter().map(|word| word.text.as_str()).collect::<Vec<_>>(),
+            ["מצב", "REQ-2026-104", "כמות"]
+        );
+        assert_eq!(
+            ltr.iter().map(|word| word.text.as_str()).collect::<Vec<_>>(),
+            ["hello", "שלום", "world"]
+        );
+        assert_eq!(
+            numeric.iter().map(|word| word.text.as_str()).collect::<Vec<_>>(),
+            ["17", "09", "42"]
+        );
+        assert_eq!(
+            rtl_with_url.iter().map(|word| word.text.as_str()).collect::<Vec<_>>(),
+            ["الحالة", "https://example.test/a/very/long/resource-name"]
+        );
+        assert_eq!(
+            rtl_edge_tie.iter().map(|word| word.text.as_str()).collect::<Vec<_>>(),
+            ["الحالة", "status"]
+        );
+        assert_eq!(
+            ltr_edge_tie.iter().map(|word| word.text.as_str()).collect::<Vec<_>>(),
+            ["الحالة", "status"]
+        );
+    }
+
+    #[test]
+    fn inline_content_groups_y_jitter_before_per_line_direction_sorting() {
+        let tsv = format!(
+            "{TSV_HEADER}\
+5\t1\t1\t1\t1\t1\t100\t103\t60\t20\t90\tالثاني\n\
+5\t1\t1\t1\t1\t2\t300\t100\t60\t20\t90\tالأول\n\
+5\t1\t1\t1\t2\t1\t300\t203\t60\t20\t90\tworld\n\
+5\t1\t1\t1\t2\t2\t100\t200\t60\t20\t90\thello\n"
+        );
+
+        let content = build_content_with_inline_tables(&tsv, &[], 0.0);
+
+        assert_eq!(content, "الأول الثاني\n\nhello world");
+    }
+
+    #[test]
+    fn rtl_table_geometry_stays_ascending_until_final_presentation() {
+        let word = |text: &str, left, top| HocrWord {
+            text: text.to_string(),
+            left,
+            top,
+            width: 40,
+            height: 20,
+            confidence: 95.0,
+        };
+        let words = vec![
+            word("כמות", 100, 0),
+            word("קוד", 200, 0),
+            word("מצב", 300, 0),
+            word("42", 100, 60),
+            word("REQ-2026-104", 200, 60),
+            word("מוכן", 300, 60),
+        ];
+        let (mut table, mut positions) = reconstruct_cleaned_table(&words, &TesseractConfig::default());
+
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+
+        orient_table_for_reading_order(&mut table, &mut positions, &words);
+
+        assert_eq!(table[0], ["מצב", "קוד", "כמות"]);
+        assert!(positions.windows(2).all(|pair| pair[0] > pair[1]));
+    }
 
     #[cfg(feature = "bundle-tessdata-eng")]
     fn recover_quantity_from_image(image: &image::RgbImage) -> Option<HocrWord> {

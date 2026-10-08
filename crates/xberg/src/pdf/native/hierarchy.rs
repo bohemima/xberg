@@ -14,7 +14,7 @@ use super::NativeDocument;
 // Inline-script rejoining measures baselines and character origins in raw page
 // coordinates, so it needs the strict page-axis predicate, not the
 // rotation-agnostic writing-mode one.
-use super::span_geometry::is_horizontal_ltr;
+use super::span_geometry::{has_same_rotation, is_horizontal_ltr, upright_advance_extent, upright_cross_extent};
 use crate::pdf::error::Result;
 use crate::pdf::hierarchy::SegmentData;
 
@@ -673,12 +673,41 @@ fn extract_segments_from_page_inner(
             return Ok(Vec::new());
         }
     };
-    reorder_page_reading_order(
-        &mut page_text_data.spans,
-        page_text_data.page_width,
-        page_text_data.page_height,
-        page_index,
-    );
+    let has_rtl = page_text_data.spans.iter().any(|span| {
+        span.text
+            .chars()
+            .any(|character| xberg_native_pdf::text::is_rtl_text(character as u32))
+    });
+    let mut used_structure_order = false;
+    if has_rtl {
+        match xberg_native_pdf::pipeline::order_page_spans(&doc.doc, page_index, page_text_data.spans.clone()) {
+            Ok(ordered)
+                if ordered.iter().any(|span| {
+                    span.order_info.source
+                        == xberg_native_pdf::pipeline::ordered_span::ReadingOrderSource::StructureTree
+                }) =>
+            {
+                page_text_data.spans = ordered.into_iter().map(|span| span.span).collect();
+                preserve_rtl_structure_boundaries(&mut page_text_data.spans);
+                used_structure_order = true;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::debug!(
+                    page = page_index,
+                    "RTL structure reading order failed for hierarchy: {error}"
+                );
+            }
+        }
+    }
+    if !used_structure_order {
+        reorder_page_reading_order(
+            &mut page_text_data.spans,
+            page_text_data.page_width,
+            page_text_data.page_height,
+            page_index,
+        );
+    }
     let spans = rejoin_inline_scripts(page_text_data.spans);
 
     let segments: Vec<SegmentData> = spans
@@ -716,6 +745,46 @@ fn extract_segments_from_page_inner(
         .collect();
 
     Ok(dedupe_redrawn_segments(segments))
+}
+
+fn preserve_rtl_structure_boundaries(spans: &mut [xberg_native_pdf::layout::TextSpan]) {
+    for index in 1..spans.len() {
+        let (previous, current) = spans.split_at_mut(index);
+        let previous = &mut previous[index - 1];
+        let current = &current[0];
+        if current.text.chars().all(char::is_whitespace) {
+            if !previous.text.ends_with(char::is_whitespace) {
+                previous.text.push(' ');
+            }
+            continue;
+        }
+        if !has_same_rotation(previous, current)
+            || previous.text.chars().last().is_some_and(char::is_whitespace)
+            || current.text.chars().next().is_some_and(char::is_whitespace)
+            || !previous
+                .text
+                .chars()
+                .chain(current.text.chars())
+                .any(|character| xberg_native_pdf::text::is_rtl_text(character as u32))
+        {
+            continue;
+        }
+        let (previous_cross, _) = upright_cross_extent(previous);
+        let (current_cross, _) = upright_cross_extent(current);
+        let effective_height = previous
+            .bbox
+            .height
+            .max(current.bbox.height)
+            .max(current.font_size * 0.5);
+        if (previous_cross - current_cross).abs() >= effective_height * 0.5 {
+            continue;
+        }
+        let (previous_start, _) = upright_advance_extent(previous);
+        let (_, current_end) = upright_advance_extent(current);
+        if previous_start - current_end > current.font_size * 0.15 {
+            previous.text.push(' ');
+        }
+    }
 }
 
 /// Minimum positional tolerance (pt) for treating two identical-text spans as
@@ -1100,7 +1169,65 @@ mod tests {
     use xberg_native_pdf::geometry::Rect;
     use xberg_native_pdf::layout::TextSpan;
 
-    use super::SegmentData;
+    use super::{NativeDocument, SegmentData};
+
+    #[test]
+    fn tagged_rtl_hierarchy_segments_follow_logical_structure_order() {
+        for (fixture, anchors, spaced_fragments) in [
+            (
+                "pdf/rtl_hebrew_native.pdf",
+                [
+                    "דוח בדיקת חילוץ בעברית",
+                    "מספר בקשה:",
+                    "2026-104",
+                    "OCR",
+                    "שלבי הבדיקה",
+                    "מצב",
+                ],
+                ["שלבי", "מצב"],
+            ),
+            (
+                "pdf/rtl_arabic_native.pdf",
+                ["تقرير", "رقم الطلب:", "2026-104", "OCR", "خطوات", "الحالة"],
+                ["خطوات", "الحالة"],
+            ),
+        ] {
+            let Some(bytes) = crate::utils::read_test_fixture(fixture) else {
+                return;
+            };
+            let mut document = NativeDocument::open_bytes(&bytes).expect("RTL PDF fixture must parse");
+            let segments = super::extract_segments_from_page(&mut document, 0).expect("RTL PDF fixture must extract");
+            for fragment in spaced_fragments {
+                let segment = segments
+                    .iter()
+                    .find(|segment| segment.text.trim() == fragment)
+                    .unwrap_or_else(|| panic!("missing segment {fragment:?} in {fixture}"));
+                assert!(
+                    segment.text.ends_with(char::is_whitespace),
+                    "missing RTL word boundary after {fragment:?} in {fixture}"
+                );
+            }
+            let text = segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let positions: Vec<_> = anchors
+                .iter()
+                .map(|anchor| {
+                    text.find(anchor)
+                        .unwrap_or_else(|| panic!("missing {anchor:?} in {text:?}"))
+                })
+                .collect();
+            assert!(
+                positions.windows(2).all(|pair| pair[0] < pair[1]),
+                "wrong logical order for {fixture}: {text:?}"
+            );
+        }
+    }
 
     fn text_span(text: &str, x: f32, y: f32, width: f32) -> TextSpan {
         TextSpan {
@@ -1108,6 +1235,20 @@ mod tests {
             bbox: Rect::new(x, y, width, 11.0),
             ..TextSpan::default()
         }
+    }
+
+    #[test]
+    fn rtl_structure_fragments_preserve_visual_word_boundaries() {
+        let mut spans = vec![
+            text_span("שלבי", 507.0, 552.0, 37.0),
+            text_span("הבדיקה", 449.0, 552.0, 54.0),
+            text_span("מחובר", 410.0, 552.0, 39.0),
+        ];
+
+        super::preserve_rtl_structure_boundaries(&mut spans);
+
+        assert_eq!(spans[0].text, "שלבי ");
+        assert_eq!(spans[1].text, "הבדיקה");
     }
 
     fn prose_columns() -> Vec<TextSpan> {
