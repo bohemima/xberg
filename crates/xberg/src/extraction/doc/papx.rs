@@ -232,7 +232,7 @@ impl ListFormats {
 }
 
 /// Read one `FibRgFcLcb97` pair, rejecting an absent or empty structure.
-fn read_fc_lcb(word_doc: &[u8], rg_fc_lcb_offset: usize, index: usize) -> Option<(usize, usize)> {
+pub(super) fn read_fc_lcb(word_doc: &[u8], rg_fc_lcb_offset: usize, index: usize) -> Option<(usize, usize)> {
     let at = rg_fc_lcb_offset + index * 8;
     let bytes = word_doc.get(at..at + 8)?;
     let fc = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;

@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **(doc): headers, footers, footnotes, comments and text boxes of a Word 97-2003 document reach the
+  output.** The parser read this text, but the extractor emitted only the body paragraphs whenever
+  there were any, so it was missing from every output format. Footnotes and comments are now footnote
+  and comment definitions, as in `.docx`, and appear in plain, Markdown, HTML and Djot output. Headers
+  and footers sit on their own layers, so `content_filter.include_headers` and `include_footers`
+  select them as they do for `.docx`. A document whose only text is a header or footer no longer
+  reports that text as body text. (GH#2054)
+
 ## [1.3.7] - 2026-10-08
 
 ### Added

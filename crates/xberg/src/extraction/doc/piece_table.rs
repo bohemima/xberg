@@ -81,8 +81,11 @@ pub(super) fn extract_text_word97(
             pos += 4;
 
             let plc_pcd = &clx[pos..];
-            let list_tables = papx::ListTables::build(word_doc, table_stream, rg_fc_lcb_offset);
-            return extract_text_from_piece_table(word_doc, plc_pcd, &subdoc_ranges, total_cp, warnings, &list_tables);
+            let tables = DocTables {
+                lists: papx::ListTables::build(word_doc, table_stream, rg_fc_lcb_offset),
+                stories: StoryTables::read(word_doc, table_stream, rg_fc_lcb_offset, &subdoc_ranges),
+            };
+            return extract_text_from_piece_table(word_doc, plc_pcd, &subdoc_ranges, total_cp, warnings, &tables);
         } else if clxt == 0x01 {
             pos += 1;
             if pos + 2 > clx.len() {
@@ -352,7 +355,7 @@ fn extract_text_from_piece_table(
     ranges: &SubdocRanges,
     total_cp: usize,
     warnings: &mut Vec<ProcessingWarning>,
-    list_tables: &papx::ListTables,
+    tables: &DocTables,
 ) -> Result<MainText> {
     let plc_size = plc_pcd.len();
     if plc_size < 16 {
@@ -407,7 +410,166 @@ fn extract_text_from_piece_table(
     }
 
     Ok(MainText {
-        paragraphs: split_main_paragraphs(&text.main, &text.main_fc_ends, list_tables),
+        paragraphs: split_main_paragraphs(&text.main, &text.main_fc_ends, &tables.lists),
+        subdocuments: collect_subdocuments(&text, &tables.stories, warnings),
         content,
     })
+}
+
+/// Table-stream structures the piece-table walk resolves text against.
+struct DocTables {
+    lists: papx::ListTables,
+    stories: StoryTables,
+}
+
+/// Story boundaries of the subdocuments that hold more than one story, as CPs
+/// relative to the subdocument's start. `None` when the table is absent or
+/// unusable.
+struct StoryTables {
+    footnote: Option<Vec<usize>>,
+    header: Option<Vec<usize>>,
+    annotation: Option<Vec<usize>>,
+}
+
+impl StoryTables {
+    fn read(word_doc: &[u8], table_stream: &[u8], rg_fc_lcb_offset: usize, ranges: &SubdocRanges) -> Self {
+        let read =
+            |index, range: SubdocRange| read_story_bounds(word_doc, table_stream, rg_fc_lcb_offset, index, range.len());
+        Self {
+            footnote: read(FIB_FC_LCB_IDX_PLCFFND_TXT, ranges.footnote),
+            header: read(FIB_FC_LCB_IDX_PLCF_HDD, ranges.header)
+                .filter(|bounds| header_table_has_whole_sections(bounds)),
+            annotation: read(FIB_FC_LCB_IDX_PLCFAND_TXT, ranges.annotation),
+        }
+    }
+}
+
+/// Read a story table (`PlcffndTxt`, `PlcfHdd`, `PlcfandTxt`) into the CP each
+/// story starts at, followed by the end of the last story.
+///
+/// [MS-DOC] gives these tables one CP per story, then the end of the last
+/// story, which must equal `ccp - 1`, then a final CP readers must ignore. A
+/// table that does not fit the table stream, runs backwards or does not cover
+/// the subdocument from CP 0 to `ccp - 1` is treated as absent; splitting by it
+/// would silently drop the uncovered text. ~keep
+fn read_story_bounds(
+    word_doc: &[u8],
+    table_stream: &[u8],
+    rg_fc_lcb_offset: usize,
+    index: usize,
+    ccp: usize,
+) -> Option<Vec<usize>> {
+    let (fc, lcb) = papx::read_fc_lcb(word_doc, rg_fc_lcb_offset, index)?;
+    // A single story already takes three 4-byte CPs.
+    if lcb < 12 || lcb % 4 != 0 {
+        return None;
+    }
+    let plc = table_stream.get(fc..fc.checked_add(lcb)?)?;
+    let mut bounds: Vec<usize> = plc
+        .chunks_exact(4)
+        .map(|cp| u32::from_le_bytes([cp[0], cp[1], cp[2], cp[3]]) as usize)
+        .collect();
+    bounds.pop();
+    let ordered = bounds.windows(2).all(|pair| pair[0] <= pair[1]);
+    let covers_subdocument = bounds.first() == Some(&0) && bounds.last() == Some(&ccp.checked_sub(1)?);
+    (ordered && covers_subdocument).then_some(bounds)
+}
+
+/// The header subdocument opens with six footnote and endnote separator
+/// stories, then holds six stories per section: even header, odd header, even
+/// footer, odd footer, first-page header, first-page footer ([MS-DOC]
+/// `Plcfhdd`). ~keep
+const HEADER_SEPARATOR_STORIES: usize = 6;
+const HEADER_STORIES_PER_SECTION: usize = 6;
+
+/// Whether a `PlcfHdd` has the shape above: the separator stories and whole
+/// sections, at least one. Any other count would file stories under the wrong
+/// kind or drop them as separators, so such a table counts as malformed.
+fn header_table_has_whole_sections(bounds: &[usize]) -> bool {
+    let stories = bounds.len().saturating_sub(1);
+    stories > HEADER_SEPARATOR_STORIES
+        && (stories - HEADER_SEPARATOR_STORIES).is_multiple_of(HEADER_STORIES_PER_SECTION)
+}
+
+/// Whether header story `index` is a header or a footer; `None` for a separator.
+fn header_story_kind(index: usize) -> Option<DocSubdocumentKind> {
+    match index.checked_sub(HEADER_SEPARATOR_STORIES)? % HEADER_STORIES_PER_SECTION {
+        0 | 1 | 4 => Some(DocSubdocumentKind::Header),
+        _ => Some(DocSubdocumentKind::Footer),
+    }
+}
+
+/// Cut a subdocument's text (one char per CP) at `bounds` and normalize each
+/// story. A story the piece table did not fully cover comes out short.
+fn split_stories(text: &str, bounds: &[usize]) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    bounds
+        .windows(2)
+        .map(|story| {
+            let start = story[0].min(chars.len());
+            let end = story[1].min(chars.len());
+            normalize_doc_text(&chars[start..end].iter().collect::<String>())
+        })
+        .collect()
+}
+
+/// Split the footnote, header and comment subdocuments into their stories, in
+/// the order `content` lists them, and add the text-box subdocument whole.
+/// Without a usable story table a subdocument stays one story, with a warning.
+fn collect_subdocuments(
+    text: &SubdocumentText,
+    tables: &StoryTables,
+    warnings: &mut Vec<ProcessingWarning>,
+) -> Vec<DocSubdocument> {
+    let mut subdocuments = Vec::new();
+    for (raw, bounds, kind, fallback_warning) in [
+        (
+            &text.footnote,
+            &tables.footnote,
+            DocSubdocumentKind::Footnote,
+            "Footnote table (PlcffndTxt) is missing or malformed; all footnote text is reported as one footnote",
+        ),
+        (
+            &text.header,
+            &tables.header,
+            DocSubdocumentKind::Header,
+            "Header table (PlcfHdd) is missing or malformed; all header and footer text is reported as header text",
+        ),
+        (
+            &text.annotation,
+            &tables.annotation,
+            DocSubdocumentKind::Comment,
+            "Comment table (PlcfandTxt) is missing or malformed; all comment text is reported as one comment",
+        ),
+    ] {
+        let Some(bounds) = bounds else {
+            let whole = normalize_doc_text(raw);
+            if !whole.is_empty() {
+                crate::core::diagnostics::push_warning(warnings, DOC_WARNING_SOURCE, fallback_warning);
+                subdocuments.push(DocSubdocument { kind, text: whole });
+            }
+            continue;
+        };
+        for (index, story) in split_stories(raw, bounds).into_iter().enumerate() {
+            let story_kind = if kind == DocSubdocumentKind::Header {
+                header_story_kind(index)
+            } else {
+                Some(kind)
+            };
+            if let Some(kind) = story_kind
+                && !story.is_empty()
+            {
+                subdocuments.push(DocSubdocument { kind, text: story });
+            }
+        }
+    }
+
+    let textbox = normalize_doc_text(&text.textbox);
+    if !textbox.is_empty() {
+        subdocuments.push(DocSubdocument {
+            kind: DocSubdocumentKind::TextBox,
+            text: textbox,
+        });
+    }
+    subdocuments
 }
