@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
@@ -12,6 +13,107 @@ use crate::core::config::concurrency::LayoutBatchWorkload;
 fn extraction_cache_namespaces_invalidate_pre_f32_pdf_results() {
     assert_eq!(CACHE_KEY_NAMESPACE, b"xberg-engine-extract-v2");
     assert_eq!(BATCH_CACHE_KEY_NAMESPACE, b"xberg-engine-extract-batch-v2");
+}
+
+#[test]
+fn effective_input_config_borrows_base_when_input_has_no_overrides() {
+    let base = ExtractionConfig::default();
+    let input = ExtractInput::from_bytes(b"hello".to_vec(), "text/plain", None);
+
+    let effective = effective_input_config(&input, &base);
+
+    assert!(matches!(effective, Cow::Borrowed(_)));
+    assert!(std::ptr::eq(effective.as_ref(), &base));
+}
+
+#[test]
+fn effective_input_config_owns_merged_config_when_input_has_overrides() {
+    let base = ExtractionConfig::default();
+    let input = ExtractInput {
+        config: Some(crate::core::config::FileExtractionConfig {
+            force_ocr: Some(true),
+            ..Default::default()
+        }),
+        ..ExtractInput::from_bytes(b"hello".to_vec(), "text/plain", None)
+    };
+
+    let effective = effective_input_config(&input, &base);
+
+    assert!(matches!(effective, Cow::Owned(_)));
+    assert!(effective.force_ocr);
+}
+
+#[test]
+fn effective_input_config_preserves_cancelled_token_without_installing_one() {
+    let token = crate::cancellation::CancellationToken::new();
+    token.cancel();
+    let base = ExtractionConfig {
+        extraction_timeout_secs: Some(30),
+        cancel_token: Some(token),
+        ..Default::default()
+    };
+    let input = ExtractInput {
+        config: Some(crate::core::config::FileExtractionConfig {
+            force_ocr: Some(true),
+            ..Default::default()
+        }),
+        ..ExtractInput::from_bytes(b"hello".to_vec(), "text/plain", None)
+    };
+
+    let effective = effective_input_config(&input, &base);
+
+    assert!(matches!(effective, Cow::Owned(_)));
+    assert!(
+        effective
+            .cancel_token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+    );
+
+    let without_token = ExtractionConfig {
+        extraction_timeout_secs: Some(30),
+        cancel_token: None,
+        ..Default::default()
+    };
+    let input_without_overrides = ExtractInput::from_bytes(b"hello".to_vec(), "text/plain", None);
+    let effective = effective_input_config(&input_without_overrides, &without_token);
+    assert!(matches!(effective, Cow::Borrowed(_)));
+    assert!(effective.cancel_token.is_none());
+}
+
+#[test]
+fn content_cache_key_ignores_the_internal_timeout_cancellation_token() {
+    let input = ExtractInput::from_bytes(b"hello".to_vec(), "text/plain", None);
+    let without_token = ExtractionConfig {
+        extraction_timeout_secs: Some(30),
+        ..Default::default()
+    };
+    let mut with_token = without_token.clone();
+    with_token.ensure_cancel_token();
+
+    assert_eq!(
+        content_cache_key(&input, &without_token),
+        content_cache_key(&input, &with_token)
+    );
+}
+
+#[test]
+fn content_cache_key_changes_when_per_input_config_changes() {
+    let base = ExtractionConfig::default();
+    let without_override = ExtractInput::from_bytes(b"same bytes".to_vec(), "text/plain", None);
+    let with_override = ExtractInput {
+        config: Some(crate::core::config::FileExtractionConfig {
+            force_ocr: Some(true),
+            ..Default::default()
+        }),
+        ..without_override.clone()
+    };
+
+    assert_ne!(
+        content_cache_key(&without_override, &base),
+        content_cache_key(&with_override, &base),
+        "a per-input override must participate in the content cache key"
+    );
 }
 
 #[tokio::test]

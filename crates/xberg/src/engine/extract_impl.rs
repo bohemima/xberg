@@ -5,6 +5,7 @@
 //! `crate::extract_batch` delegate here via a process-global default
 //! [`crate::engine::Engine`].
 
+use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 #[cfg(feature = "otel")]
@@ -102,7 +103,7 @@ pub(crate) async fn extract(
         return Err(error);
     }
 
-    let cache_key = content_cache_key(&input, config);
+    let cache_key = inner.cache_enabled.then(|| content_cache_key(&input, config)).flatten();
     if let Some(key) = cache_key.as_deref()
         && let Some(cached_bytes) = inner.cache.get(key).await
         && let Ok(cached_result) = serde_json::from_slice::<ExtractionResult>(&cached_bytes)
@@ -194,7 +195,7 @@ fn content_cache_key(input: &ExtractInput, base_config: &ExtractionConfig) -> Op
         return None;
     }
     let bytes = input.bytes.as_deref()?;
-    let resolved_config = resolve_input_config(input, base_config);
+    let resolved_config = effective_input_config(input, base_config);
     // A findings file is mutable external input whose contents are absent from the cache key. ~keep
     if resolved_config
         .redaction
@@ -254,7 +255,10 @@ pub(crate) async fn extract_batch(
         return Err(error);
     }
 
-    let cache_key = batch_content_cache_key(&inputs, config);
+    let cache_key = inner
+        .cache_enabled
+        .then(|| batch_content_cache_key(&inputs, config))
+        .flatten();
     if let Some(key) = cache_key.as_deref()
         && let Some(cached_bytes) = inner.cache.get(key).await
         && let Ok(cached_result) = serde_json::from_slice::<ExtractionResult>(&cached_bytes)
@@ -557,7 +561,7 @@ async fn prioritize_pending_batch_items(
                 costs[position] = input.bytes.as_ref().map(|bytes| bytes.len() as u64);
             }
             ExtractInputKind::Uri => {
-                let effective_config = resolve_input_config(input, base_config);
+                let effective_config = effective_input_config(input, base_config);
                 let cancelled = effective_config
                     .cancel_token
                     .as_ref()
@@ -664,7 +668,7 @@ fn classify_layout_batch<'a>(
         let mut input_count = 0;
         for input in inputs {
             input_count += 1;
-            let effective = resolve_input_config(input, config);
+            let effective = effective_input_config(input, config);
             let pdf_evidence = pdf_batch_evidence(input);
             let markdown_pdf = effective.layout.is_some()
                 && effective.use_layout_for_markdown
@@ -1081,11 +1085,7 @@ async fn extract_one(input: ExtractInput, base_config: &ExtractionConfig, index:
 }
 
 fn resolve_input_config(input: &ExtractInput, base_config: &ExtractionConfig) -> ExtractionConfig {
-    let mut resolved = input
-        .config
-        .as_ref()
-        .map(|overrides| base_config.with_file_overrides(overrides))
-        .unwrap_or_else(|| base_config.clone());
+    let mut resolved = effective_input_config(input, base_config).into_owned();
     // Install a token here, before this item's own timeout wrapper (`run_batch_item`,
     // `finalize_shared_item`) races against `extract_file`/`extract_bytes`'s inner
     // timeout — the outer wrapper starts first and has the same duration, so it always
@@ -1093,6 +1093,13 @@ fn resolve_input_config(input: &ExtractInput, base_config: &ExtractionConfig) ->
     // extractor checkpoints observe. See `ExtractionConfig::ensure_cancel_token`.
     resolved.ensure_cancel_token();
     resolved
+}
+
+fn effective_input_config<'a>(input: &'a ExtractInput, base_config: &'a ExtractionConfig) -> Cow<'a, ExtractionConfig> {
+    match input.config.as_ref() {
+        Some(overrides) => Cow::Owned(base_config.with_file_overrides(overrides)),
+        None => Cow::Borrowed(base_config),
+    }
 }
 
 /// Resolve config for batch items, taking Arc<ExtractionConfig> to avoid unnecessary clones.

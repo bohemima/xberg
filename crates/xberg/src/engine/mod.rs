@@ -55,6 +55,7 @@ struct EngineInner {
 
     /// Content-addressed byte cache. Default: [`NoopCache`].
     cache: Arc<dyn CacheBackend>,
+    cache_enabled: bool,
     /// Progress event sink. Default: [`NoopProgressSink`].
     progress: Arc<dyn ProgressSink>,
 }
@@ -231,10 +232,12 @@ impl EngineBuilder {
 
     /// Finalize the builder into an [`Engine`].
     pub fn build(self) -> Engine {
+        let cache_enabled = self.cache.is_some();
         let inner = EngineInner {
             #[cfg(all(feature = "url-ingestion", feature = "tokio-runtime", not(target_arch = "wasm32")))]
             crawl: parking_lot::Mutex::new(None),
             cache: self.cache.unwrap_or_else(|| Arc::new(NoopCache)),
+            cache_enabled,
             progress: self.progress.unwrap_or_else(|| Arc::new(NoopProgressSink)),
         };
         Engine { inner: Arc::new(inner) }
@@ -250,6 +253,20 @@ mod tests {
     use super::*;
     use crate::types::ExtractedDocument;
     use seams::ProgressEvent;
+
+    #[test]
+    fn default_engine_disables_the_engine_cache_seam() {
+        let engine = Engine::new_default();
+
+        assert!(!engine.inner.cache_enabled);
+    }
+
+    #[test]
+    fn injected_backend_enables_the_engine_cache_seam() {
+        let engine = Engine::builder().with_cache_backend(Arc::new(NoopCache)).build();
+
+        assert!(engine.inner.cache_enabled);
+    }
 
     /// A [`ProgressSink`] that records the stage of every emitted event, in order.
     #[derive(Default)]
@@ -553,6 +570,47 @@ mod tests {
                 "extract_batch_start".to_string(),
                 "extract_batch_cache_hit".to_string(),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_not_consult_injected_cache_when_config_disables_caching() {
+        let cache = Arc::new(InMemoryCacheBackend::default());
+        let engine = Engine::builder().with_cache_backend(cache.clone()).build();
+        let config = ExtractionConfig {
+            use_cache: false,
+            ..Default::default()
+        };
+
+        let single = engine
+            .extract(
+                ExtractInput::from_bytes(b"uncached single input".to_vec(), "text/plain", None),
+                &config,
+            )
+            .await
+            .unwrap();
+        let batch = engine
+            .extract_batch(
+                vec![
+                    ExtractInput::from_bytes(b"uncached batch item one".to_vec(), "text/plain", None),
+                    ExtractInput::from_bytes(b"uncached batch item two".to_vec(), "text/plain", None),
+                ],
+                &config,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(single.results.len(), 1);
+        assert_eq!(batch.results.len(), 2);
+        assert_eq!(
+            cache.gets.load(Ordering::SeqCst),
+            0,
+            "cache-disabled single and batch extraction must not consult an injected backend"
+        );
+        assert_eq!(
+            cache.puts.load(Ordering::SeqCst),
+            0,
+            "cache-disabled single and batch extraction must not write to an injected backend"
         );
     }
 

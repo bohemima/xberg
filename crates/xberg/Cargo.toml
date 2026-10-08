@@ -1748,5 +1748,13 @@ name = "concurrency_scaling"
 harness = false
 required-features = ["pdf", "layout-detection", "ocr"]
 
+[[bench]]
+name = "batch_config_resolution"
+harness = false
+
+[[bench]]
+name = "engine_noop_cache_batch"
+harness = false
+
 [lints]
 workspace = true
