@@ -161,6 +161,7 @@ fn test_extract_doc_invalid_magic() {
 const TEST_CSW: usize = 14;
 const TEST_CSLW: usize = 22;
 const TEST_FIB_BASE: usize = 32;
+const TEST_FIB_FC_LCB_IDX_PLCF_HDD: usize = 11;
 
 fn write_u16(buf: &mut [u8], offset: usize, val: u16) {
     buf[offset..offset + 2].copy_from_slice(&val.to_le_bytes());
@@ -190,7 +191,7 @@ fn test_fc_clx_offset() -> usize {
 /// Build a `len`-byte WordDocument-stream FIB header with the given
 /// `ccp*` fields set. `len` must be large enough to hold the header
 /// (at least `test_fc_clx_offset() + 8`) plus any text placed after it.
-fn build_fib(len: usize, ccp_text: u32, ccp_ftn: u32, ccp_atn: u32, ccp_txbx: u32) -> Vec<u8> {
+fn build_fib(len: usize, ccp_text: u32, ccp_ftn: u32, ccp_hdd: u32, ccp_atn: u32, ccp_txbx: u32) -> Vec<u8> {
     let mut buf = vec![0u8; len];
     write_u16(&mut buf, 0, 0xA5EC); // wIdent
     write_u16(&mut buf, 2, 0x00C1); // Word 97 nFib ~keep
@@ -201,6 +202,7 @@ fn build_fib(len: usize, ccp_text: u32, ccp_ftn: u32, ccp_atn: u32, ccp_txbx: u3
     let rg_lw_offset = test_rg_lw_offset();
     write_u32(&mut buf, rg_lw_offset + FIB_LW_IDX_CCP_TEXT * 4, ccp_text);
     write_u32(&mut buf, rg_lw_offset + FIB_LW_IDX_CCP_FTN * 4, ccp_ftn);
+    write_u32(&mut buf, rg_lw_offset + FIB_LW_IDX_CCP_HDD * 4, ccp_hdd);
     write_u32(&mut buf, rg_lw_offset + FIB_LW_IDX_CCP_ATN * 4, ccp_atn);
     write_u32(&mut buf, rg_lw_offset + FIB_LW_IDX_CCP_TXBX * 4, ccp_txbx);
     buf
@@ -242,6 +244,18 @@ fn build_table_stream(word_doc: &mut [u8], plc_pcd: &[u8]) -> Vec<u8> {
     let mut table_stream = vec![0u8; FC_CLX as usize];
     table_stream.extend_from_slice(&clx);
     table_stream
+}
+
+fn add_plcf_hdd(word_doc: &mut [u8], table_stream: &mut Vec<u8>, story_boundaries: &[u32]) {
+    let rg_fc_lcb_offset = test_fc_clx_offset() - FIB_FC_LCB_IDX_CLX * 8;
+    let pair_offset = rg_fc_lcb_offset + TEST_FIB_FC_LCB_IDX_PLCF_HDD * 8;
+    let fc = table_stream.len() as u32;
+    let lcb = (story_boundaries.len() * 4) as u32;
+    write_u32(word_doc, pair_offset, fc);
+    write_u32(word_doc, pair_offset + 4, lcb);
+    for boundary in story_boundaries {
+        table_stream.extend_from_slice(&boundary.to_le_bytes());
+    }
 }
 
 /// A compressed (CP1252, 1 byte/char) FC pointing at `byte_offset` in the
@@ -328,24 +342,52 @@ fn should_report_fast_saved_legacy_doc_as_unsupported() {
 /// fields. Previously any piece whose CP range started at or after
 /// `ccpText` was silently skipped, so this content never appeared.
 #[test]
-fn test_extract_doc_includes_footnote_and_comment_subdocuments() {
+fn should_extract_body_and_typed_subdocuments() {
+    let doc_bytes = doc_with_body_and_typed_subdocuments();
+
+    let result = extract_doc_text(&doc_bytes).expect("DOC extraction should succeed");
+
+    assert_eq!(
+        result.content,
+        "Hello\n\nFootnotes\n\nNote one\n\nHeaders and Footers\n\nRunning header\n\nRunning footer\n\nComments\n\nSee me\n\nText Boxes\n\nBox text"
+    );
+    assert!(
+        result.processing_warnings.is_empty(),
+        "a complete, well-formed document should not warn: {:?}",
+        result.processing_warnings
+    );
+}
+
+pub(crate) fn doc_with_body_and_typed_subdocuments() -> Vec<u8> {
     let main_text = b"Hello";
     let footnote_text = b"Note one";
+    let header_text = b"Running header\r\r";
+    let footer_text = b"Running footer\r\r";
     let comment_text = b"See me";
+    let textbox_text = b"Box text";
 
     let ccp_text = main_text.len() as u32;
     let ccp_ftn = footnote_text.len() as u32;
+    let ccp_hdd = (header_text.len() + footer_text.len() + 1) as u32;
     let ccp_atn = comment_text.len() as u32;
+    let ccp_txbx = textbox_text.len() as u32;
 
     let word_doc_len = 2048;
-    let mut word_doc = build_fib(word_doc_len, ccp_text, ccp_ftn, ccp_atn, 0);
+    let mut word_doc = build_fib(word_doc_len, ccp_text, ccp_ftn, ccp_hdd, ccp_atn, ccp_txbx);
 
     let main_offset = 900usize;
     let footnote_offset = 950usize;
-    let comment_offset = 1000usize;
+    let header_offset = 1000usize;
+    let comment_offset = 1100usize;
+    let textbox_offset = 1150usize;
     word_doc[main_offset..main_offset + main_text.len()].copy_from_slice(main_text);
     word_doc[footnote_offset..footnote_offset + footnote_text.len()].copy_from_slice(footnote_text);
+    word_doc[header_offset..header_offset + header_text.len()].copy_from_slice(header_text);
+    word_doc[header_offset + header_text.len()..header_offset + header_text.len() + footer_text.len()]
+        .copy_from_slice(footer_text);
+    word_doc[header_offset + header_text.len() + footer_text.len()] = b'\r';
     word_doc[comment_offset..comment_offset + comment_text.len()].copy_from_slice(comment_text);
+    word_doc[textbox_offset..textbox_offset + textbox_text.len()].copy_from_slice(textbox_text);
 
     let pieces = vec![
         TestPiece {
@@ -360,22 +402,32 @@ fn test_extract_doc_includes_footnote_and_comment_subdocuments() {
         },
         TestPiece {
             cp_start: ccp_text + ccp_ftn,
-            cp_end: ccp_text + ccp_ftn + ccp_atn,
+            cp_end: ccp_text + ccp_ftn + ccp_hdd,
+            fc_raw: compressed_fc(header_offset as u32),
+        },
+        TestPiece {
+            cp_start: ccp_text + ccp_ftn + ccp_hdd,
+            cp_end: ccp_text + ccp_ftn + ccp_hdd + ccp_atn,
             fc_raw: compressed_fc(comment_offset as u32),
+        },
+        TestPiece {
+            cp_start: ccp_text + ccp_ftn + ccp_hdd + ccp_atn,
+            cp_end: ccp_text + ccp_ftn + ccp_hdd + ccp_atn + ccp_txbx,
+            fc_raw: compressed_fc(textbox_offset as u32),
         },
     ];
     let plc_pcd = build_plc_pcd(&pieces);
-    let table_stream = build_table_stream(&mut word_doc, &plc_pcd);
-    let doc_bytes = build_doc_ole(&word_doc, &table_stream);
-
-    let result = extract_doc_text(&doc_bytes).expect("DOC extraction should succeed");
-
-    assert_eq!(result.content, "Hello\n\nFootnotes\n\nNote one\n\nComments\n\nSee me");
-    assert!(
-        result.processing_warnings.is_empty(),
-        "a complete, well-formed document should not warn: {:?}",
-        result.processing_warnings
+    let mut table_stream = build_table_stream(&mut word_doc, &plc_pcd);
+    let header_end = header_text.len() as u32;
+    let footer_end = header_end + footer_text.len() as u32;
+    add_plcf_hdd(
+        &mut word_doc,
+        &mut table_stream,
+        &[
+            0, 0, 0, 0, 0, 0, 0, 0, header_end, header_end, footer_end, footer_end, footer_end, 0,
+        ],
     );
+    build_doc_ole(&word_doc, &table_stream)
 }
 
 /// #92: a piece table entry that declares a byte range past the end of
@@ -385,7 +437,7 @@ fn test_extract_doc_includes_footnote_and_comment_subdocuments() {
 fn test_extract_doc_warns_when_piece_range_overruns_stream() {
     let ccp_text = 10u32;
     let word_doc_len = 700usize;
-    let mut word_doc = build_fib(word_doc_len, ccp_text, 0, 0, 0);
+    let mut word_doc = build_fib(word_doc_len, ccp_text, 0, 0, 0, 0);
 
     // Only 3 bytes are actually available at this offset; the piece
     // claims 10 compressed (1 byte/char) characters.
@@ -442,7 +494,7 @@ fn fc_clx_is_read_at_ms_doc_pair_33_not_the_obsolete_pair_66() {
     const TEXT_OFFSET: usize = 2048;
     const DECOY_OFFSET: usize = 1536;
 
-    let mut word_doc = build_fib(TEXT_OFFSET + TEXT.len(), TEXT.len() as u32, 0, 0, 0);
+    let mut word_doc = build_fib(TEXT_OFFSET + TEXT.len(), TEXT.len() as u32, 0, 0, 0, 0);
     word_doc[TEXT_OFFSET..TEXT_OFFSET + TEXT.len()].copy_from_slice(TEXT.as_bytes());
     word_doc[DECOY_OFFSET..DECOY_OFFSET + FALLBACK_DECOY.len()].copy_from_slice(FALLBACK_DECOY.as_bytes());
 

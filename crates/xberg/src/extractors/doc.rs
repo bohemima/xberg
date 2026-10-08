@@ -5,10 +5,10 @@
 use crate::Result;
 use crate::core::config::ExtractionConfig;
 use crate::core::mime::LEGACY_WORD_MIME_TYPE;
-use crate::extraction::doc::{DocParagraph, extract_doc_text};
+use crate::extraction::doc::{DocParagraph, DocSubdocument, DocSubdocumentKind, extract_doc_text};
 use crate::plugins::{InternalDocumentExtractor, Plugin};
-use crate::types::Metadata;
 use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
+use crate::types::{ContentLayer, Metadata};
 use ahash::AHashMap;
 use async_trait::async_trait;
 use std::borrow::Cow;
@@ -104,10 +104,11 @@ impl InternalDocumentExtractor for DocExtractor {
         // documents that carry no paragraph properties at all (Word 6/95, or
         // the contiguous fallback), where there is nothing finer to use.
         if result.paragraphs.is_empty() {
-            push_blank_line_chunks(&mut doc, &result.content);
+            push_blank_line_chunks(&mut doc, &result.body_content);
         } else {
             push_paragraph_elements(&mut doc, &result.paragraphs);
         }
+        push_subdocument_elements(&mut doc, &result.subdocuments, config);
 
         Ok(doc)
     }
@@ -118,6 +119,35 @@ impl InternalDocumentExtractor for DocExtractor {
 
     fn priority(&self) -> i32 {
         60
+    }
+}
+
+fn push_subdocument_elements(doc: &mut InternalDocument, subdocuments: &[DocSubdocument], config: &ExtractionConfig) {
+    for subdocument in subdocuments {
+        let included = match (subdocument.kind, config.content_filter.as_ref()) {
+            (_, None) => true,
+            (DocSubdocumentKind::Header, Some(filter)) => filter.include_headers,
+            (DocSubdocumentKind::Footer, Some(filter)) => filter.include_footers,
+            (DocSubdocumentKind::HeaderFooter, Some(filter)) => filter.include_headers && filter.include_footers,
+            (DocSubdocumentKind::Footnote, Some(filter)) => filter.include_footnotes,
+            (DocSubdocumentKind::Comment | DocSubdocumentKind::TextBox, Some(_)) => true,
+        };
+        if !included {
+            continue;
+        }
+
+        let (kind, layer) = match subdocument.kind {
+            DocSubdocumentKind::Footnote => (ElementKind::FootnoteDefinition, ContentLayer::Footnote),
+            DocSubdocumentKind::Header => (ElementKind::Paragraph, ContentLayer::Header),
+            DocSubdocumentKind::Footer => (ElementKind::Paragraph, ContentLayer::Footer),
+            DocSubdocumentKind::Comment => (ElementKind::CommentDefinition, ContentLayer::Footnote),
+            DocSubdocumentKind::HeaderFooter | DocSubdocumentKind::TextBox => {
+                (ElementKind::Paragraph, ContentLayer::Body)
+            }
+        };
+        let mut element = InternalElement::text(kind, &subdocument.content, 0);
+        element.layer = layer;
+        doc.push_element(element);
     }
 }
 
@@ -441,6 +471,66 @@ mod tests {
             )),
             "a document with no list bindings must not gain list structure"
         );
+    }
+
+    #[tokio::test]
+    async fn should_emit_typed_subdocuments_when_body_has_paragraphs() {
+        let content = crate::extraction::doc::tests::doc_with_body_and_typed_subdocuments();
+
+        let doc = DocExtractor::new()
+            .extract_content(&content, LEGACY_WORD_MIME_TYPE, &ExtractionConfig::default())
+            .await
+            .expect("DOC extraction should succeed");
+        let elements: Vec<(&str, &str, crate::types::ContentLayer)> = doc
+            .elements
+            .iter()
+            .map(|element| (element.kind.discriminant(), element.text.as_str(), element.layer))
+            .collect();
+
+        assert_eq!(
+            elements,
+            vec![
+                ("paragraph", "Hello", crate::types::ContentLayer::Body),
+                ("footnote_definition", "Note one", crate::types::ContentLayer::Footnote),
+                ("paragraph", "Running header", crate::types::ContentLayer::Header),
+                ("paragraph", "Running footer", crate::types::ContentLayer::Footer),
+                ("comment_definition", "See me", crate::types::ContentLayer::Footnote),
+                ("paragraph", "Box text", crate::types::ContentLayer::Body),
+            ],
+            "the extractor must preserve each subdocument with its semantic kind and layer"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_apply_content_filters_to_typed_doc_subdocuments() {
+        let content = crate::extraction::doc::tests::doc_with_body_and_typed_subdocuments();
+        let excluded_config = ExtractionConfig {
+            content_filter: Some(crate::core::config::ContentFilterConfig::default()),
+            ..Default::default()
+        };
+        let excluded = DocExtractor::new()
+            .extract_content(&content, LEGACY_WORD_MIME_TYPE, &excluded_config)
+            .await
+            .expect("DOC extraction should succeed");
+        let excluded_texts: Vec<&str> = excluded.elements.iter().map(|element| element.text.as_str()).collect();
+        assert_eq!(excluded_texts, vec!["Hello", "See me", "Box text"]);
+
+        let config = ExtractionConfig {
+            content_filter: Some(crate::core::config::ContentFilterConfig {
+                include_headers: true,
+                include_footnotes: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let doc = DocExtractor::new()
+            .extract_content(&content, LEGACY_WORD_MIME_TYPE, &config)
+            .await
+            .expect("DOC extraction should succeed");
+        let texts: Vec<&str> = doc.elements.iter().map(|element| element.text.as_str()).collect();
+
+        assert_eq!(texts, vec!["Hello", "Note one", "Running header", "See me", "Box text"]);
     }
 
     #[tokio::test]

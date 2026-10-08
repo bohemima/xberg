@@ -82,7 +82,16 @@ pub(super) fn extract_text_word97(
 
             let plc_pcd = &clx[pos..];
             let list_tables = papx::ListTables::build(word_doc, table_stream, rg_fc_lcb_offset);
-            return extract_text_from_piece_table(word_doc, plc_pcd, &subdoc_ranges, total_cp, warnings, &list_tables);
+            let input = PieceTableInput {
+                word_doc,
+                table_stream,
+                rg_fc_lcb_offset,
+                plc_pcd,
+                ranges: &subdoc_ranges,
+                total_cp,
+                list_tables: &list_tables,
+            };
+            return extract_text_from_piece_table(input, warnings);
         } else if clxt == 0x01 {
             pos += 1;
             if pos + 2 > clx.len() {
@@ -260,6 +269,16 @@ struct PieceTableContext<'a> {
     ranges: &'a SubdocRanges,
 }
 
+struct PieceTableInput<'a> {
+    word_doc: &'a [u8],
+    table_stream: &'a [u8],
+    rg_fc_lcb_offset: usize,
+    plc_pcd: &'a [u8],
+    ranges: &'a SubdocRanges,
+    total_cp: usize,
+    list_tables: &'a papx::ListTables,
+}
+
 /// Process one entry of the piece table (`PlcPcd`), appending its decoded characters to
 /// the matching subdocument range(s) in `text`. Returns `false` when the outer loop over
 /// pieces in [`extract_text_from_piece_table`] must stop (a truncated table, or a piece
@@ -347,13 +366,18 @@ fn process_piece(
 /// footnote, header/footer, comment and text-box piece -- was silently
 /// skipped).
 fn extract_text_from_piece_table(
-    word_doc: &[u8],
-    plc_pcd: &[u8],
-    ranges: &SubdocRanges,
-    total_cp: usize,
+    input: PieceTableInput<'_>,
     warnings: &mut Vec<ProcessingWarning>,
-    list_tables: &papx::ListTables,
 ) -> Result<MainText> {
+    let PieceTableInput {
+        word_doc,
+        table_stream,
+        rg_fc_lcb_offset,
+        plc_pcd,
+        ranges,
+        total_cp,
+        list_tables,
+    } = input;
     let plc_size = plc_pcd.len();
     if plc_size < 16 {
         return Err(XbergError::parsing("PlcPcd too small"));
@@ -388,7 +412,8 @@ fn extract_text_from_piece_table(
         );
     }
 
-    let mut content = normalize_doc_text(&text.main);
+    let body_content = normalize_doc_text(&text.main);
+    let mut content = body_content.clone();
     for (label, section) in [
         ("Footnotes", &text.footnote),
         ("Headers and Footers", &text.header),
@@ -406,8 +431,106 @@ fn extract_text_from_piece_table(
         }
     }
 
+    let subdocuments = collect_subdocuments(word_doc, table_stream, rg_fc_lcb_offset, &text, warnings);
+
     Ok(MainText {
         paragraphs: split_main_paragraphs(&text.main, &text.main_fc_ends, list_tables),
         content,
+        body_content,
+        subdocuments,
     })
+}
+
+fn collect_subdocuments(
+    word_doc: &[u8],
+    table_stream: &[u8],
+    rg_fc_lcb_offset: usize,
+    text: &SubdocumentText,
+    warnings: &mut Vec<ProcessingWarning>,
+) -> Vec<DocSubdocument> {
+    let mut subdocuments = Vec::new();
+    push_subdocument(&mut subdocuments, DocSubdocumentKind::Footnote, &text.footnote);
+    if !text.header.is_empty() {
+        match split_header_footer_stories(word_doc, table_stream, rg_fc_lcb_offset, &text.header) {
+            Some(stories) => subdocuments.extend(stories),
+            None => {
+                crate::core::diagnostics::push_warning(
+                    warnings,
+                    DOC_WARNING_SOURCE,
+                    "Header/footer text was preserved, but its PlcfHdd boundary table was missing or malformed",
+                );
+                push_subdocument(&mut subdocuments, DocSubdocumentKind::HeaderFooter, &text.header);
+            }
+        }
+    }
+    push_subdocument(&mut subdocuments, DocSubdocumentKind::Comment, &text.annotation);
+    push_subdocument(&mut subdocuments, DocSubdocumentKind::TextBox, &text.textbox);
+    subdocuments
+}
+
+fn push_subdocument(subdocuments: &mut Vec<DocSubdocument>, kind: DocSubdocumentKind, raw: &str) {
+    let content = normalize_doc_text(raw);
+    if !content.is_empty() {
+        subdocuments.push(DocSubdocument { kind, content });
+    }
+}
+
+/// Split the header document with its `PlcfHdd` story boundaries. The first
+/// six stories are note separators; every later group is ordered even header,
+/// odd header, even footer, odd footer, first header, first footer. ~keep
+fn split_header_footer_stories(
+    word_doc: &[u8],
+    table_stream: &[u8],
+    rg_fc_lcb_offset: usize,
+    header_text: &str,
+) -> Option<Vec<DocSubdocument>> {
+    let pair_offset = rg_fc_lcb_offset.checked_add(FIB_FC_LCB_IDX_PLCF_HDD * 8)?;
+    let fc = read_u32_at(word_doc, pair_offset)? as usize;
+    let lcb = read_u32_at(word_doc, pair_offset + 4)? as usize;
+    if lcb < 8 || !lcb.is_multiple_of(4) || fc.checked_add(lcb)? > table_stream.len() {
+        return None;
+    }
+
+    let boundaries: Vec<usize> = table_stream[fc..fc + lcb]
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize)
+        .collect();
+    // [MS-DOC] 2.8.22: the second-to-last CP only terminates the last story and
+    // the final CP is undefined, so a PlcfHdd with N CPs describes N-2 stories. ~keep
+    let story_count = boundaries.len().checked_sub(2)?;
+    if story_count < 6 || (story_count - 6) % 6 != 0 {
+        return None;
+    }
+
+    let chars: Vec<char> = header_text.chars().collect();
+    let story_end = *boundaries.get(story_count)?;
+    if story_end.checked_add(1)? != chars.len() || !boundaries[..=story_count].windows(2).all(|pair| pair[0] <= pair[1])
+    {
+        return None;
+    }
+
+    let mut subdocuments = Vec::new();
+    for story_index in 6..story_count {
+        let start = boundaries[story_index];
+        let end = boundaries[story_index + 1];
+        if end > chars.len() {
+            return None;
+        }
+        let mut story: String = chars[start..end].iter().collect();
+        if story.ends_with(PARAGRAPH_MARK) {
+            story.pop();
+        }
+        let kind = match (story_index - 6) % 6 {
+            0 | 1 | 4 => DocSubdocumentKind::Header,
+            2 | 3 | 5 => DocSubdocumentKind::Footer,
+            _ => unreachable!(),
+        };
+        push_subdocument(&mut subdocuments, kind, &story);
+    }
+    Some(subdocuments)
+}
+
+fn read_u32_at(data: &[u8], offset: usize) -> Option<u32> {
+    let bytes = data.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
