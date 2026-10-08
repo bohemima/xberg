@@ -11,7 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.3.7] - 2026-10-08
 
+### Added
+
+- **(pdf): pre-extracted spans can use canonical page reading order.** `order_page_spans` applies tagged structure,
+  article-thread, and geometric ordering without parsing page content a second time, including for layer-filtered text.
+
+### Changed
+
+- **(benchmarks): cold-process and warm in-process latency are reported as separate regimes.** Opt-in steady-state
+  Xberg runs retain model sessions across iterations, publish a separate cold-start probe, and remain excluded from
+  cross-framework rankings until competitors expose equivalent persistent-process adapters.
+
 ### Fixed
+
+- **(pdf, ocr): Arabic and Hebrew extraction preserve logical reading order.** Tagged native PDFs use trustworthy
+  structure order without reversing table cells, and Tesseract output orders mixed-direction lines and tables from
+  their local text direction and geometry. Sparse whole-image RTL OCR also retries a single-block segmentation mode
+  when it recovers more strong-script tokens without materially reducing confidence.
 
 - **(benchmarks): benchmark provenance is bound to the executable that actually ran.** Clean-checkout runs now reject
   stale Xberg binaries whose embedded build identifier does not match the repository commit, and machine-readable
