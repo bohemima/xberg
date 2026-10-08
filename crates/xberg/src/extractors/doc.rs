@@ -734,6 +734,25 @@ mod tests {
         assert_header_story_falls_back(PlcKind::PartialSection).await;
     }
 
+    /// A table that stops before `ccp - 1` would silently lose the notes after
+    /// its last entry if it were used.
+    #[tokio::test]
+    async fn a_note_table_that_omits_the_last_note_falls_back_to_one_definition_with_a_warning() {
+        let doc = extract_synthetic(PlcKind::Valid, PlcKind::MissingLastStory).await;
+
+        let footnotes = definitions(&doc, ElementKind::FootnoteDefinition);
+        assert_eq!(footnotes.len(), 1, "{footnotes:?}");
+        assert!(
+            footnotes[0].1.contains("Second footnote"),
+            "the uncovered note must not be dropped: {footnotes:?}"
+        );
+        assert!(
+            warned(&doc),
+            "the fallback must be reported: {:?}",
+            doc.processing_warnings
+        );
+    }
+
     #[tokio::test]
     async fn missing_note_tables_make_each_note_story_one_definition_with_a_warning() {
         let doc = extract_synthetic(PlcKind::Valid, PlcKind::Absent).await;

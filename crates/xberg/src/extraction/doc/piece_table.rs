@@ -448,9 +448,10 @@ impl StoryTables {
 /// story starts at, followed by the end of the last story.
 ///
 /// [MS-DOC] gives these tables one CP per story, then the end of the last
-/// story, then a final CP readers must ignore. A table that does not fit the
-/// table stream, runs backwards or reaches past the subdocument is treated as
-/// absent. ~keep
+/// story, which must equal `ccp - 1`, then a final CP readers must ignore. A
+/// table that does not fit the table stream, runs backwards or does not cover
+/// the subdocument from CP 0 to `ccp - 1` is treated as absent; splitting by it
+/// would silently drop the uncovered text. ~keep
 fn read_story_bounds(
     word_doc: &[u8],
     table_stream: &[u8],
@@ -470,7 +471,8 @@ fn read_story_bounds(
         .collect();
     bounds.pop();
     let ordered = bounds.windows(2).all(|pair| pair[0] <= pair[1]);
-    (ordered && bounds.last().is_some_and(|&end| end <= ccp)).then_some(bounds)
+    let covers_subdocument = bounds.first() == Some(&0) && bounds.last() == Some(&ccp.checked_sub(1)?);
+    (ordered && covers_subdocument).then_some(bounds)
 }
 
 /// The header subdocument opens with six footnote and endnote separator

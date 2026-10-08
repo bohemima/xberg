@@ -333,8 +333,10 @@ fn should_report_fast_saved_legacy_doc_as_unsupported() {
 #[test]
 fn test_extract_doc_includes_footnote_and_comment_subdocuments() {
     let main_text = b"Hello";
-    let footnote_text = b"Note one";
-    let comment_text = b"See me";
+    // A note ends in a paragraph mark, and its subdocument in one more that
+    // belongs to no note, which is where the note tables must end ([MS-DOC]).
+    let footnote_text = b"Note one\r\r";
+    let comment_text = b"See me\r\r";
 
     let ccp_text = main_text.len() as u32;
     let ccp_ftn = footnote_text.len() as u32;
@@ -371,8 +373,8 @@ fn test_extract_doc_includes_footnote_and_comment_subdocuments() {
     let mut table_stream = build_table_stream(&mut word_doc, &plc_pcd);
     // [MS-DOC] requires the note tables whenever there are notes.
     for (pair, note) in [
-        (MS_DOC_SPEC_PLCFFND_TXT_PAIR, "Note one"),
-        (MS_DOC_SPEC_PLCFAND_TXT_PAIR, "See me"),
+        (MS_DOC_SPEC_PLCFFND_TXT_PAIR, "Note one\r"),
+        (MS_DOC_SPEC_PLCFAND_TXT_PAIR, "See me\r"),
     ] {
         write_story_plc(&mut word_doc, &mut table_stream, pair, &[note], PlcKind::Valid);
     }
@@ -563,6 +565,8 @@ pub(crate) enum PlcKind {
     /// Lists the separator stories and one story of a section, so the count
     /// is not six per section. Readable, but not a `PlcfHdd` shape.
     PartialSection,
+    /// Leaves out the last story, so the table ends before `ccp - 1`.
+    MissingLastStory,
 }
 
 /// Text for each CP range of a synthetic Word 97 document. Every string is
@@ -599,10 +603,10 @@ fn write_story_plc(
     kind: PlcKind,
 ) {
     let (mut fc, mut lcb) = (0u32, 0u32);
-    let stories = if kind == PlcKind::PartialSection {
-        &stories[..stories.len().min(SEPARATOR_STORIES.len() + 1)]
-    } else {
-        stories
+    let stories = match kind {
+        PlcKind::PartialSection => &stories[..stories.len().min(SEPARATOR_STORIES.len() + 1)],
+        PlcKind::MissingLastStory => &stories[..stories.len().saturating_sub(1)],
+        _ => stories,
     };
     if !stories.is_empty() && kind != PlcKind::Absent {
         let mut cps = Vec::new();
