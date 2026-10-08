@@ -5,9 +5,10 @@
 use crate::Result;
 use crate::core::config::ExtractionConfig;
 use crate::core::mime::LEGACY_WORD_MIME_TYPE;
-use crate::extraction::doc::{DocParagraph, extract_doc_text};
+use crate::extraction::doc::{DocParagraph, DocSubdocument, DocSubdocumentKind, extract_doc_text};
 use crate::plugins::{InternalDocumentExtractor, Plugin};
 use crate::types::Metadata;
+use crate::types::document_structure::ContentLayer;
 use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
 use ahash::AHashMap;
 use async_trait::async_trait;
@@ -102,11 +103,23 @@ impl InternalDocumentExtractor for DocExtractor {
         // Elements follow Word's own paragraph structure, matching what the
         // DOCX path does with `w:p`. The blank-line fallback is only for
         // documents that carry no paragraph properties at all (Word 6/95, or
-        // the contiguous fallback), where there is nothing finer to use.
-        if result.paragraphs.is_empty() {
+        // the contiguous fallback), where there is nothing finer to use; those
+        // paths have no subdocuments either.
+        if result.paragraphs.is_empty() && result.subdocuments.is_empty() {
             push_blank_line_chunks(&mut doc, &result.content);
         } else {
             push_paragraph_elements(&mut doc, &result.paragraphs);
+            push_subdocuments(&mut doc, &result.subdocuments);
+        }
+
+        // As in the DOCX extractor, the content filter decides here whether
+        // header and footer text is kept.
+        if let Some(filter) = &config.content_filter {
+            doc.elements.retain(|element| match element.layer {
+                ContentLayer::Header => filter.include_headers,
+                ContentLayer::Footer => filter.include_footers,
+                _ => true,
+            });
         }
 
         Ok(doc)
@@ -256,6 +269,48 @@ fn push_paragraph_elements(doc: &mut InternalDocument, paragraphs: &[DocParagrap
     close_lists(doc, &mut open, 0);
 }
 
+/// Emit header, footer, footnote, comment and text-box text after the body, the
+/// way the DOCX path does: headers and footers one paragraph per line on their
+/// own layers, each footnote and comment as one definition on the Footnote layer
+/// with its paragraphs joined by a space, and text boxes as body paragraphs.
+fn push_subdocuments(doc: &mut InternalDocument, subdocuments: &[DocSubdocument]) {
+    let mut footnotes = 0;
+    let mut comments = 0;
+    for subdocument in subdocuments {
+        let (kind, layer, anchor) = match subdocument.kind {
+            DocSubdocumentKind::Header => (ElementKind::Paragraph, ContentLayer::Header, None),
+            DocSubdocumentKind::Footer => (ElementKind::Paragraph, ContentLayer::Footer, None),
+            DocSubdocumentKind::TextBox => (ElementKind::Paragraph, ContentLayer::Body, None),
+            DocSubdocumentKind::Footnote => {
+                footnotes += 1;
+                let anchor = format!("fn{footnotes}");
+                (ElementKind::FootnoteDefinition, ContentLayer::Footnote, Some(anchor))
+            }
+            DocSubdocumentKind::Comment => {
+                comments += 1;
+                let anchor = format!("cmt{comments}");
+                (ElementKind::CommentDefinition, ContentLayer::Footnote, Some(anchor))
+            }
+        };
+        let lines: Vec<&str> = subdocument
+            .text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let texts = match anchor {
+            Some(_) => vec![lines.join(" ")],
+            None => lines.iter().map(|line| line.to_string()).collect(),
+        };
+        for text in texts {
+            let mut element = InternalElement::text(kind, text, 0);
+            element.layer = layer;
+            element.anchor = anchor.clone();
+            doc.push_element(element);
+        }
+    }
+}
+
 /// Decide whether a paragraph is a heading, and at what level.
 ///
 /// #1553: the two signals are not interchangeable and neither is usable alone.
@@ -292,6 +347,9 @@ fn close_lists(doc: &mut InternalDocument, open: &mut Vec<bool>, target: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extraction::doc::tests::{
+        PlcKind, SEPARATOR_STORIES, SyntheticDoc, build_synthetic_doc, header_doc_stories,
+    };
 
     fn corpus(relative: &str) -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
@@ -585,5 +643,106 @@ mod tests {
             )
         });
         assert!(has_paragraph, "DOC should produce Paragraph nodes");
+    }
+
+    // --- Subdocument stories a real file cannot show (#2054) ---
+    //
+    // `tests/doc_subdocuments.rs` covers a well-formed LibreOffice document through
+    // the public API. These build the cases it cannot: story tables that are absent
+    // or malformed, and separator stories that carry text. ~keep
+
+    const FOOTNOTES: [&str; 2] = ["\u{2}First footnote\r", "\u{2}Second footnote\r"];
+    const COMMENTS: [&str; 2] = ["\u{5}First comment\r", "\u{5}Second comment\r"];
+
+    async fn extract_synthetic(plcf_hdd: PlcKind, note_plcs: PlcKind) -> InternalDocument {
+        let bytes = build_synthetic_doc(&SyntheticDoc {
+            body: "Body paragraph\r",
+            footnotes: &FOOTNOTES,
+            header_stories: &header_doc_stories(),
+            comments: &COMMENTS,
+            plcf_hdd,
+            note_plcs,
+        });
+        DocExtractor::new()
+            .extract_content(&bytes, LEGACY_WORD_MIME_TYPE, &ExtractionConfig::default())
+            .await
+            .expect("a synthetic DOC should extract without error")
+    }
+
+    fn on_layer(doc: &InternalDocument, layer: ContentLayer, needle: &str) -> bool {
+        doc.elements.iter().any(|e| e.layer == layer && e.text.contains(needle))
+    }
+
+    /// `(anchor, text)` of every element of `kind`.
+    fn definitions(doc: &InternalDocument, kind: ElementKind) -> Vec<(Option<&str>, &str)> {
+        doc.elements
+            .iter()
+            .filter(|e| e.kind == kind)
+            .map(|e| (e.anchor.as_deref(), e.text.as_str()))
+            .collect()
+    }
+
+    fn warned(doc: &InternalDocument) -> bool {
+        doc.processing_warnings.iter().any(|w| w.source == "doc")
+    }
+
+    #[tokio::test]
+    async fn separator_stories_are_never_emitted() {
+        let doc = extract_synthetic(PlcKind::Valid, PlcKind::Valid).await;
+
+        // The markers are in the document, so their absence is the reader's doing.
+        assert!(on_layer(&doc, ContentLayer::Header, "Odd page header"));
+        for separator in SEPARATOR_STORIES {
+            let marker = separator.trim_end();
+            assert!(
+                !doc.elements.iter().any(|e| e.text.contains(marker)),
+                "separator story {marker:?} must not be emitted"
+            );
+        }
+    }
+
+    /// PlcfHdd missing or malformed: the header story cannot be split, so all of
+    /// it is emitted as Header, with a warning and no error.
+    async fn assert_header_story_falls_back(plcf_hdd: PlcKind) {
+        let doc = extract_synthetic(plcf_hdd, PlcKind::Valid).await;
+
+        for needle in ["Odd page header", "Odd page footer"] {
+            assert!(on_layer(&doc, ContentLayer::Header, needle), "{needle:?} not on Header");
+        }
+        assert!(!doc.elements.iter().any(|e| e.layer == ContentLayer::Footer));
+        assert!(
+            warned(&doc),
+            "the fallback must be reported: {:?}",
+            doc.processing_warnings
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_plcf_hdd_falls_back_to_the_whole_header_story() {
+        assert_header_story_falls_back(PlcKind::Absent).await;
+    }
+
+    #[tokio::test]
+    async fn a_plcf_hdd_past_the_table_stream_falls_back_to_the_whole_header_story() {
+        assert_header_story_falls_back(PlcKind::OutOfRange).await;
+    }
+
+    #[tokio::test]
+    async fn missing_note_tables_make_each_note_story_one_definition_with_a_warning() {
+        let doc = extract_synthetic(PlcKind::Valid, PlcKind::Absent).await;
+
+        let footnotes = definitions(&doc, ElementKind::FootnoteDefinition);
+        assert_eq!(footnotes.len(), 1, "{footnotes:?}");
+        assert_eq!(footnotes[0].0, Some("fn1"));
+        assert!(footnotes[0].1.contains("First footnote") && footnotes[0].1.contains("Second footnote"));
+        let comments = definitions(&doc, ElementKind::CommentDefinition);
+        assert_eq!(comments.len(), 1, "{comments:?}");
+        assert_eq!(comments[0].0, Some("cmt1"));
+        assert!(comments[0].1.contains("First comment") && comments[0].1.contains("Second comment"));
+        assert!(
+            warned(&doc),
+            "the fallback must be reported: {:?}",
+            doc.processing_warnings
+        );
     }
 }

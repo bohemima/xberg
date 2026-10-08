@@ -178,13 +178,16 @@ fn test_rg_lw_offset() -> usize {
     cslw_offset + 2
 }
 
+/// `rg_fc_lcb_offset` for the layout built by `build_fib`.
+fn test_rg_fc_lcb_offset() -> usize {
+    let cbrgfclcb_offset = test_rg_lw_offset() + TEST_CSLW * 4;
+    cbrgfclcb_offset + 2
+}
+
 /// `fc_clx_offset` for the layout built by `build_fib` (`lcb_clx_offset`
 /// is always `fc_clx_offset + 4`).
 fn test_fc_clx_offset() -> usize {
-    let rg_lw_offset = test_rg_lw_offset();
-    let cbrgfclcb_offset = rg_lw_offset + TEST_CSLW * 4;
-    let rg_fc_lcb_offset = cbrgfclcb_offset + 2;
-    rg_fc_lcb_offset + FIB_FC_LCB_IDX_CLX * 8
+    test_rg_fc_lcb_offset() + FIB_FC_LCB_IDX_CLX * 8
 }
 
 /// Build a `len`-byte WordDocument-stream FIB header with the given
@@ -365,7 +368,14 @@ fn test_extract_doc_includes_footnote_and_comment_subdocuments() {
         },
     ];
     let plc_pcd = build_plc_pcd(&pieces);
-    let table_stream = build_table_stream(&mut word_doc, &plc_pcd);
+    let mut table_stream = build_table_stream(&mut word_doc, &plc_pcd);
+    // [MS-DOC] requires the note tables whenever there are notes.
+    for (pair, note) in [
+        (MS_DOC_SPEC_PLCFFND_TXT_PAIR, "Note one"),
+        (MS_DOC_SPEC_PLCFAND_TXT_PAIR, "See me"),
+    ] {
+        write_story_plc(&mut word_doc, &mut table_stream, pair, &[note], PlcKind::Valid);
+    }
     let doc_bytes = build_doc_ole(&word_doc, &table_stream);
 
     let result = extract_doc_text(&doc_bytes).expect("DOC extraction should succeed");
@@ -490,4 +500,168 @@ fn fc_clx_is_read_at_ms_doc_pair_33_not_the_obsolete_pair_66() {
         "the contiguous fallback ran, so fcClx read as 0: {:?}",
         result.content
     );
+}
+
+// --- Synthetic `.doc` with header/footer, footnote and comment stories (#2054) ---
+//
+// For what a real file cannot show: absent or malformed story tables, and
+// separator stories that carry text.
+//
+// `ccpHdd` text is split into stories by `PlcfHdd` ([MS-DOC] `Plcfhdd`):
+// six separator stories, then six per section (even header, odd header, even
+// footer, odd footer, first-page header, first-page footer). The aCP array holds
+// one CP per story plus two: the second-to-last ends the last story and equals
+// `ccpHdd - 1`, the last is undefined and ignored. The header document ends in
+// one extra paragraph mark that belongs to no story. `PlcffndTxt` (footnotes)
+// and `PlcfandTxt` (comments) follow the same rule against `ccpFtn`/`ccpAtn`:
+// one CP per note plus two. A footnote's text starts with the reference
+// character U+0002, a comment's with U+0005. ~keep
+
+/// `FibRgFcLcb97` pair indices of `fcPlcffndTxt`, `fcPlcfandTxt` and
+/// `fcPlcfHdd`. Written as literals here, not through reader constants, so a
+/// wrong index in the reader cannot move the fixture with it (see #1551
+/// above). ~keep
+const MS_DOC_SPEC_PLCFFND_TXT_PAIR: usize = 3;
+const MS_DOC_SPEC_PLCFAND_TXT_PAIR: usize = 5;
+const MS_DOC_SPEC_PLCF_HDD_PAIR: usize = 11;
+
+/// The six separator stories every header document starts with. They carry
+/// recognisable text here (Word writes control characters) so a reader that
+/// emits them is detectable.
+pub(crate) const SEPARATOR_STORIES: [&str; 6] = [
+    "Footnote separator\r",
+    "Footnote continuation separator\r",
+    "Footnote continuation notice\r",
+    "Endnote separator\r",
+    "Endnote continuation separator\r",
+    "Endnote continuation notice\r",
+];
+
+/// One section's six stories, in [MS-DOC] order.
+const ONE_SECTION_STORIES: [&str; 6] = [
+    "Even page header\r",
+    "Odd page header\r",
+    "Even page footer\r",
+    "Odd page footer\r",
+    "First page header\r",
+    "First page footer\r",
+];
+
+/// Separator stories followed by one section's six stories.
+pub(crate) fn header_doc_stories() -> Vec<&'static str> {
+    [SEPARATOR_STORIES, ONE_SECTION_STORIES].concat()
+}
+
+/// How [`build_synthetic_doc`] writes a story-splitting PLC.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum PlcKind {
+    Valid,
+    /// `fc`/`lcb` are zero although the subdocument is not empty.
+    Absent,
+    /// `fc` points past the end of the table stream.
+    OutOfRange,
+}
+
+/// Text for each CP range of a synthetic Word 97 document. Every string is
+/// written verbatim, so callers include reference characters and paragraph
+/// marks. An empty slice means the subdocument does not exist.
+pub(crate) struct SyntheticDoc<'a> {
+    pub body: &'a str,
+    /// One string per footnote.
+    pub footnotes: &'a [&'a str],
+    pub header_stories: &'a [&'a str],
+    /// One string per comment.
+    pub comments: &'a [&'a str],
+    pub plcf_hdd: PlcKind,
+    /// How both `PlcffndTxt` and `PlcfandTxt` are written.
+    pub note_plcs: PlcKind,
+}
+
+/// CP count of a subdocument made of `stories`: their text plus the one final
+/// paragraph mark that belongs to no story.
+fn subdocument_cp_count(stories: &[&str]) -> usize {
+    if stories.is_empty() {
+        0
+    } else {
+        stories.concat().len() + 1
+    }
+}
+
+/// Append a story-splitting PLC to the table stream and point the FIB pair at it.
+fn write_story_plc(
+    word_doc: &mut [u8],
+    table_stream: &mut Vec<u8>,
+    pair_index: usize,
+    stories: &[&str],
+    kind: PlcKind,
+) {
+    let (mut fc, mut lcb) = (0u32, 0u32);
+    if !stories.is_empty() && kind != PlcKind::Absent {
+        let mut cps = Vec::new();
+        let mut cp = 0u32;
+        for story in stories {
+            cps.push(cp);
+            cp += story.len() as u32;
+        }
+        cps.push(cp); // ccp - 1
+        cps.push(cp + 1); // undefined, ignored
+        fc = table_stream.len() as u32;
+        lcb = (cps.len() * 4) as u32;
+        for cp in &cps {
+            table_stream.extend_from_slice(&cp.to_le_bytes());
+        }
+        if kind == PlcKind::OutOfRange {
+            fc += 0x1_0000;
+        }
+    }
+    let pair = test_rg_fc_lcb_offset() + pair_index * 8;
+    write_u32(word_doc, pair, fc);
+    write_u32(word_doc, pair + 4, lcb);
+}
+
+/// Build a `.doc` whose CP space is body, footnotes, header document and
+/// comments, all in one piece.
+pub(crate) fn build_synthetic_doc(spec: &SyntheticDoc) -> Vec<u8> {
+    const TEXT_OFFSET: usize = 900;
+    const CB_RG_FC_LCB_97: u16 = 93;
+
+    let mut text = String::from(spec.body);
+    for stories in [spec.footnotes, spec.header_stories, spec.comments] {
+        text.push_str(&stories.concat());
+        if !stories.is_empty() {
+            text.push('\r');
+        }
+    }
+    assert!(text.is_ascii(), "the piece is written as one byte per character");
+
+    let mut word_doc = build_fib(
+        TEXT_OFFSET + text.len() + 16,
+        spec.body.len() as u32,
+        subdocument_cp_count(spec.footnotes) as u32,
+        subdocument_cp_count(spec.comments) as u32,
+        0,
+    );
+    write_u32(
+        &mut word_doc,
+        test_rg_lw_offset() + FIB_LW_IDX_CCP_HDD * 4,
+        subdocument_cp_count(spec.header_stories) as u32,
+    );
+    write_u16(&mut word_doc, test_rg_lw_offset() + TEST_CSLW * 4, CB_RG_FC_LCB_97);
+    word_doc[TEXT_OFFSET..TEXT_OFFSET + text.len()].copy_from_slice(text.as_bytes());
+
+    let plc_pcd = build_plc_pcd(&[TestPiece {
+        cp_start: 0,
+        cp_end: text.len() as u32,
+        fc_raw: compressed_fc(TEXT_OFFSET as u32),
+    }]);
+    let mut table_stream = build_table_stream(&mut word_doc, &plc_pcd);
+    for (pair, stories, kind) in [
+        (MS_DOC_SPEC_PLCFFND_TXT_PAIR, spec.footnotes, spec.note_plcs),
+        (MS_DOC_SPEC_PLCFAND_TXT_PAIR, spec.comments, spec.note_plcs),
+        (MS_DOC_SPEC_PLCF_HDD_PAIR, spec.header_stories, spec.plcf_hdd),
+    ] {
+        write_story_plc(&mut word_doc, &mut table_stream, pair, stories, kind);
+    }
+
+    build_doc_ole(&word_doc, &table_stream)
 }

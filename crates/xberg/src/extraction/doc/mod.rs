@@ -36,6 +36,7 @@ pub(crate) struct DocParagraph {
 struct MainText {
     content: String,
     paragraphs: Vec<DocParagraph>,
+    subdocuments: Vec<DocSubdocument>,
 }
 
 impl MainText {
@@ -45,8 +46,28 @@ impl MainText {
         Self {
             content,
             paragraphs: Vec::new(),
+            subdocuments: Vec::new(),
         }
     }
+}
+
+/// One header, footer, footnote, comment or the text-box subdocument.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DocSubdocument {
+    pub kind: DocSubdocumentKind,
+    /// Normalized text, paragraphs separated by `\n`.
+    pub text: String,
+}
+
+/// Where a [`DocSubdocument`] comes from. Headers and footers share one
+/// subdocument; `PlcfHdd` tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum DocSubdocumentKind {
+    Header,
+    Footer,
+    Footnote,
+    Comment,
+    TextBox,
 }
 
 /// A paragraph's place in an automatic list.
@@ -73,6 +94,11 @@ pub(crate) struct DocExtractionResult {
     /// carries no paragraph properties (Word 6/95, or the contiguous
     /// fallback), in which case callers keep using `content`. ~keep
     pub paragraphs: Vec<DocParagraph>,
+    /// Header, footer, footnote, comment and text-box text, one entry per
+    /// story or note. `content` carries the same text as labelled sections;
+    /// `paragraphs` does not. Empty whenever `paragraphs` is empty because the
+    /// document took a path without them.
+    pub subdocuments: Vec<DocSubdocument>,
 }
 
 /// Metadata extracted from DOC files.
@@ -123,6 +149,7 @@ pub(crate) fn extract_doc_text(content: &[u8]) -> Result<DocExtractionResult> {
             metadata,
             processing_warnings: Vec::new(),
             paragraphs: Vec::new(),
+            subdocuments: Vec::new(),
         });
     }
     let use_1table = (flags_a & 0x0200) != 0;
@@ -138,6 +165,7 @@ pub(crate) fn extract_doc_text(content: &[u8]) -> Result<DocExtractionResult> {
         metadata,
         processing_warnings,
         paragraphs: main.paragraphs,
+        subdocuments: main.subdocuments,
     })
 }
 
@@ -153,6 +181,14 @@ const FIB_LW_IDX_CCP_TEXT: usize = 3;
 /// document and the piece table was never walked -- the whole `Clx` path was
 /// unreachable at runtime and only the contiguous fallback ever ran. ~keep
 const FIB_FC_LCB_IDX_CLX: usize = 33;
+/// Index of the `fcPlcffndTxt`/`lcbPlcffndTxt` pair: where each footnote starts
+/// in the footnote subdocument.
+const FIB_FC_LCB_IDX_PLCFFND_TXT: usize = 3;
+/// Index of the `fcPlcfandTxt`/`lcbPlcfandTxt` pair: where each comment starts.
+const FIB_FC_LCB_IDX_PLCFAND_TXT: usize = 5;
+/// Index of the `fcPlcfHdd`/`lcbPlcfHdd` pair: where each header and footer
+/// story starts in the header subdocument.
+const FIB_FC_LCB_IDX_PLCF_HDD: usize = 11;
 /// Index of `ccpFtn` (footnote subdocument CP count) in the FIB's `FibRgLw97`
 /// long-word array.
 const FIB_LW_IDX_CCP_FTN: usize = 4;
@@ -708,4 +744,4 @@ mod metadata;
 use metadata::extract_doc_metadata;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -22,7 +22,7 @@ pub struct ContentFilterConfig {
     ///
     /// - PDF: Disables top-margin furniture stripping and prevents the layout
     ///   model from treating `PageHeader`-classified regions as furniture.
-    /// - DOCX: Includes document headers in text output.
+    /// - DOC/DOCX: Includes document headers in text output.
     /// - RTF/ODT: Headers already included; this is a no-op when true.
     /// - HTML/EPUB: Keeps `<header>` element content.
     ///
@@ -34,7 +34,7 @@ pub struct ContentFilterConfig {
     ///
     /// - PDF: Disables bottom-margin furniture stripping and prevents the layout
     ///   model from treating `PageFooter`-classified regions as furniture.
-    /// - DOCX: Includes document footers in text output.
+    /// - DOC/DOCX: Includes document footers in text output.
     /// - RTF/ODT: Footers already included; this is a no-op when true.
     /// - HTML/EPUB: Keeps `<footer>` element content.
     ///
