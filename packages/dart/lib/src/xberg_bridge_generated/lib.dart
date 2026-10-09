@@ -4110,7 +4110,7 @@ class ContentFilterConfig {
   ///
   /// - PDF: Disables top-margin furniture stripping and prevents the layout
   ///   model from treating `PageHeader`-classified regions as furniture.
-  /// - DOCX: Includes document headers in text output.
+  /// - DOC/DOCX: Includes document headers in text output.
   /// - RTF/ODT: Headers already included; this is a no-op when true.
   /// - HTML/EPUB: Keeps `<header>` element content.
   ///
@@ -4121,7 +4121,7 @@ class ContentFilterConfig {
   ///
   /// - PDF: Disables bottom-margin furniture stripping and prevents the layout
   ///   model from treating `PageFooter`-classified regions as furniture.
-  /// - DOCX: Includes document footers in text output.
+  /// - DOC/DOCX: Includes document footers in text output.
   /// - RTF/ODT: Footers already included; this is a no-op when true.
   /// - HTML/EPUB: Keeps `<footer>` element content.
   ///
@@ -4133,6 +4133,7 @@ class ContentFilterConfig {
   /// - PDF: Prevents the layout model from treating `Footnote`-classified
   ///   regions as furniture, so footnote bodies survive alongside the main
   ///   text instead of being silently dropped.
+  /// - DOC: Includes footnote definitions in extracted output.
   /// - Other formats: No effect currently.
   ///
   /// Default: `false` (footnotes are stripped), matching the existing
