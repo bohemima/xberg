@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whitespace-corridor search accepted the gap between a column and a lone header label or page number as a gutter, so
   the two columns were read line by line. That search now needs text on at least six rows on each side of a corridor,
   however many spans a label is written in.
+- **(doc): Chinese and Japanese text in Word 97-2003 documents is no longer garbled.** Text stored as UTF-16 in which
+  more than a quarter of the characters were CJK ideographs was decoded a second time as cp1252, so Chinese came out
+  as mojibake such as `E\-N„v'Y` and kanji-heavy Japanese was garbled. The second decode read only half of that text,
+  so a mostly Latin document with one Chinese paragraph could come back cut off halfway. No warning was raised. (GH#2073)
 
 ## [1.3.7] - 2026-10-09
 
