@@ -108,6 +108,46 @@ pub struct LanguageConfidence {
     pub reliable: bool,
 }
 
+/// A page whose OCR backend call failed without aborting document extraction.
+///
+/// The corresponding human-readable [`ProcessingWarning`] remains available for
+/// backward compatibility. This record provides stable fields for callers that need
+/// to identify affected pages without parsing warning text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "alef-meta", alef(skip))]
+pub struct OcrPageFailure {
+    /// One-based page number in the source document.
+    pub page: u32,
+    /// OCR backend error text.
+    pub error: String,
+    /// Whether content for this page was retained or recovered through another route.
+    pub recovered: bool,
+}
+
+pub(crate) const OCR_PAGE_FAILURES_METADATA_KEY: &str = "ocr_page_failures";
+
+pub(crate) fn set_ocr_page_failures_metadata(metadata: &mut Metadata, failures: Vec<OcrPageFailure>) {
+    if failures.is_empty() {
+        metadata.additional.remove(OCR_PAGE_FAILURES_METADATA_KEY);
+        return;
+    }
+    metadata.additional.insert(
+        Cow::Borrowed(OCR_PAGE_FAILURES_METADATA_KEY),
+        serde_json::Value::Array(
+            failures
+                .into_iter()
+                .map(|failure| {
+                    serde_json::json!({
+                        "page": failure.page,
+                        "error": failure.error,
+                        "recovered": failure.recovered,
+                    })
+                })
+                .collect(),
+        ),
+    );
+}
+
 /// Document extracted by the core extraction pipeline.
 ///
 /// `extract` and `extract_batch` return an `ExtractionResult` envelope whose
@@ -1015,6 +1055,25 @@ impl ExtractedDocument {
             ..Default::default()
         }
     }
+
+    /// Return structured OCR backend failures recorded for individual PDF pages.
+    ///
+    /// A recovered failure means the returned document still contains page content from
+    /// native text or embedded-image recovery. The corresponding human-readable
+    /// [`ProcessingWarning`] remains available for backward compatibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a third-party extractor supplied malformed
+    /// `metadata.additional["ocr_page_failures"]` data.
+    #[cfg_attr(alef, alef(skip))]
+    pub fn ocr_page_failures(&self) -> serde_json::Result<Vec<OcrPageFailure>> {
+        self.metadata
+            .additional
+            .get(OCR_PAGE_FAILURES_METADATA_KEY)
+            .cloned()
+            .map_or_else(|| Ok(Vec::new()), serde_json::from_value)
+    }
 }
 
 impl super::tables::Table {
@@ -1108,6 +1167,52 @@ mod tests {
             DocumentCounts::default(),
             "omitted counts must default to all-zero DocumentCounts"
         );
+    }
+
+    #[test]
+    fn should_return_empty_ocr_page_failures_when_metadata_is_absent() {
+        let result = ExtractedDocument::default();
+
+        assert_eq!(result.ocr_page_failures().unwrap(), Vec::<OcrPageFailure>::new());
+    }
+
+    #[test]
+    fn should_return_typed_ocr_page_failures_from_metadata() {
+        let expected = vec![
+            OcrPageFailure {
+                page: 2,
+                error: "backend unavailable".to_string(),
+                recovered: true,
+            },
+            OcrPageFailure {
+                page: 4,
+                error: "recognition failed".to_string(),
+                recovered: false,
+            },
+        ];
+        let mut result = ExtractedDocument::default();
+        result.metadata.additional.insert(
+            Cow::Borrowed("ocr_page_failures"),
+            serde_json::json!([
+                {"page": 2, "error": "backend unavailable", "recovered": true},
+                {"page": 4, "error": "recognition failed", "recovered": false}
+            ]),
+        );
+
+        assert_eq!(result.ocr_page_failures().unwrap(), expected);
+    }
+
+    #[test]
+    fn should_return_error_when_ocr_page_failure_metadata_is_malformed() {
+        let mut result = ExtractedDocument::default();
+        result
+            .metadata
+            .additional
+            .insert(Cow::Borrowed("ocr_page_failures"), serde_json::json!({"page": 2}));
+
+        let error = result.ocr_page_failures().unwrap_err();
+
+        assert!(error.to_string().contains("invalid type: map, expected a sequence"));
     }
 
     #[test]

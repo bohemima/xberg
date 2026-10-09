@@ -3771,6 +3771,14 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            result.9,
+            vec![crate::types::OcrPageFailure {
+                page: 2,
+                error: "OCR error: mock backend failure for square page".to_string(),
+                recovered: true,
+            }]
+        );
 
         let pipeline_config = ExtractionConfig {
             force_ocr_pages: Some(vec![1, 2, 3]),
@@ -3809,6 +3817,45 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(pipeline_result.9.len(), 1);
+        assert_eq!(pipeline_result.9[0].page, 2);
+        assert!(pipeline_result.9[0].recovered);
+
+        let blank_native = "native page one\n";
+        let blank_boundaries = vec![
+            PageBoundary {
+                byte_start: 0,
+                byte_end: "native page one".len(),
+                page_number: 1,
+            },
+            PageBoundary {
+                byte_start: blank_native.len(),
+                byte_end: blank_native.len(),
+                page_number: 2,
+            },
+        ];
+        let blank_native_result = extract_mixed_ocr_native(
+            blank_native,
+            &blank_boundaries,
+            &[1, 2],
+            &build_minimal_pdf_with_media_boxes(&[(612, 792), (504, 504)]),
+            &config,
+            None,
+        )
+        .await
+        .expect("the successful first page must keep the partial extraction available");
+        assert_eq!(
+            blank_native_result.9,
+            vec![crate::types::OcrPageFailure {
+                page: 2,
+                error: "OCR error: mock backend failure for square page".to_string(),
+                recovered: false,
+            }]
+        );
+        assert!(blank_native_result.8.iter().any(|warning| {
+            warning.message
+                == "OCR of page 2 failed (OCR error: mock backend failure for square page); the page had no native text to retain."
+        }));
 
         let square_pdf = build_minimal_pdf_with_media_boxes(&[(504, 504), (504, 504)]);
         let square_native = "first native\nsecond native";
@@ -4862,6 +4909,108 @@ mod tests {
         };
 
         assert!(error.to_string().contains("full-document failure"));
+    }
+
+    #[cfg(all(paddle_ocr, feature = "pdf", feature = "ocr"))]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn full_document_per_page_pipeline_preserves_structured_partial_failure() {
+        use crate::core::config::OcrConfig;
+        use crate::plugins::{OcrBackend, OcrBackendType, Plugin};
+        use std::sync::Arc;
+
+        struct FailSquarePageBackend(&'static str);
+
+        #[async_trait::async_trait]
+        impl OcrBackend for FailSquarePageBackend {
+            fn backend_type(&self) -> OcrBackendType {
+                OcrBackendType::Custom
+            }
+            fn supports_language(&self, _: &str) -> bool {
+                true
+            }
+            async fn process_image(
+                &self,
+                data: &[u8],
+                _: &OcrConfig,
+            ) -> crate::Result<crate::types::ExtractedDocument> {
+                let image = image::load_from_memory(data).map_err(|error| crate::XbergError::Ocr {
+                    message: format!("test backend could not decode page: {error}"),
+                    source: None,
+                })?;
+                if image.width() == image.height() {
+                    return Err(crate::XbergError::Plugin {
+                        message: format!("{} partial failure", self.0),
+                        plugin_name: self.0.to_string(),
+                    });
+                }
+                Ok(crate::types::ExtractedDocument {
+                    content: "Successful OCR text with enough readable words for the primary page.".to_string(),
+                    ..Default::default()
+                })
+            }
+        }
+
+        impl Plugin for FailSquarePageBackend {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn version(&self) -> String {
+                "1.0.0".to_string()
+            }
+            fn initialize(&self) -> crate::Result<()> {
+                Ok(())
+            }
+            fn shutdown(&self) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct RestoreBuiltins;
+
+        impl Drop for RestoreBuiltins {
+            fn drop(&mut self) {
+                let _ = crate::plugins::clear_ocr_backends();
+                crate::plugins::ensure_ocr_backends_initialized();
+            }
+        }
+
+        crate::plugins::ensure_ocr_backends_initialized();
+        crate::plugins::clear_ocr_backends().unwrap();
+        let _restore_builtins = RestoreBuiltins;
+        crate::plugins::register_ocr_backend(Arc::new(FailSquarePageBackend("tesseract"))).unwrap();
+        crate::plugins::register_ocr_backend(Arc::new(FailSquarePageBackend("paddleocr"))).unwrap();
+
+        let pdf = build_minimal_two_page_pdf_with_sizes((612.0, 792.0), (504.0, 504.0));
+        let result = super::super::super::run_ocr_with_layout(
+            &pdf,
+            &ExtractionConfig {
+                force_ocr: true,
+                ocr: Some(OcrConfig::default()),
+                ..Default::default()
+            },
+            None,
+            None,
+            #[cfg(feature = "layout-detection")]
+            None,
+            #[cfg(feature = "layout-detection")]
+            None,
+            #[cfg(feature = "layout-detection")]
+            None,
+        )
+        .await
+        .expect("one successful page must preserve the partial full-document result");
+        let document = result.3.expect("structured OCR failures require an internal document");
+
+        assert_eq!(
+            document.ocr_page_failures,
+            vec![crate::types::OcrPageFailure {
+                page: 2,
+                error: "Parsing error: All OCR pipeline backends failed (tesseract: Plugin error in 'ocr': OCR failed on all 1 page(s) and no text could be recovered from the pages' embedded images; first failure: Plugin error in 'tesseract': tesseract partial failure; paddleocr: Plugin error in 'ocr': OCR failed on all 1 page(s) and no text could be recovered from the pages' embedded images; first failure: Plugin error in 'paddleocr': paddleocr partial failure)"
+                    .to_string(),
+                recovered: false,
+            }]
+        );
     }
 
     /// Regression test (review follow-up to #1341): the nested `run_ocr_pipeline`
@@ -10445,9 +10594,15 @@ Name: ___
             "the failed page's text must come from its embedded image XObject"
         );
 
-        let warnings = doc
-            .expect("the fallback and failure warnings must produce an internal document")
-            .processing_warnings;
+        let doc = doc.expect("the fallback and failure warnings must produce an internal document");
+        assert_eq!(doc.ocr_page_failures.len(), 1);
+        assert_eq!(doc.ocr_page_failures[0].page, 1);
+        assert_eq!(
+            doc.ocr_page_failures[0].error,
+            format!("Plugin error in 'ocr': {VLM_NO_CONTENT_ERROR}")
+        );
+        assert!(doc.ocr_page_failures[0].recovered);
+        let warnings = doc.processing_warnings;
         assert!(
             warnings
                 .iter()
@@ -10763,9 +10918,11 @@ Name: ___
             "the successful page's text must survive into the document; got: {text}"
         );
 
-        let warnings = doc
-            .expect("a per-page failure warning needs an internal document")
-            .processing_warnings;
+        let doc = doc.expect("a per-page failure warning needs an internal document");
+        assert_eq!(doc.ocr_page_failures.len(), 1);
+        assert_eq!(doc.ocr_page_failures[0].page, 1);
+        assert!(!doc.ocr_page_failures[0].recovered);
+        let warnings = doc.processing_warnings;
         assert!(
             warnings.iter().any(|w| w.message.contains("OCR of page 1 failed")
                 && w.message

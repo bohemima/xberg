@@ -15,6 +15,29 @@ fn test_derive_extraction_result_basic() {
     assert!(result.document.is_none());
 }
 
+#[test]
+fn should_publish_ocr_page_failures_as_typed_metadata() {
+    let mut document = make_doc("pdf");
+    let expected = vec![crate::types::OcrPageFailure {
+        page: 2,
+        error: "backend timed out".to_string(),
+        recovered: false,
+    }];
+    document.ocr_page_failures = expected.clone();
+
+    let result = derive_extraction_result(document, false, crate::core::config::OutputFormat::Plain);
+
+    assert_eq!(result.ocr_page_failures().unwrap(), expected);
+    assert_eq!(
+        result.metadata.additional["ocr_page_failures"],
+        serde_json::json!([{
+            "page": 2,
+            "error": "backend timed out",
+            "recovered": false,
+        }])
+    );
+}
+
 /// `OutputFormat::DocTags` must produce the same output as the always-registered
 /// built-in "doctags" renderer (`plugins::registry::renderer::DocTagsRenderer`),
 /// via its own first-class match arm rather than falling through to the

@@ -248,19 +248,51 @@ fn repair_numeric_tokens_in_table(table: &mut crate::types::Table) {
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 fn push_mixed_ocr_page_failure_warning(
     warnings: &mut Vec<crate::types::ProcessingWarning>,
+    failures: &mut Vec<crate::types::OcrPageFailure>,
     page_idx: usize,
     error: &crate::XbergError,
+    recovered: bool,
 ) {
     crate::core::diagnostics::push_warning_deduped(
         warnings,
         crate::types::ProcessingWarning {
             source: std::borrow::Cow::Borrowed("ocr"),
-            message: std::borrow::Cow::Owned(format!(
-                "OCR of page {} failed ({error}); the page's native text was kept.",
-                page_idx + 1
-            )),
+            message: std::borrow::Cow::Owned(if recovered {
+                format!(
+                    "OCR of page {} failed ({error}); the page's native text was kept.",
+                    page_idx + 1
+                )
+            } else {
+                format!(
+                    "OCR of page {} failed ({error}); the page had no native text to retain.",
+                    page_idx + 1
+                )
+            }),
         },
     );
+    let page = (page_idx + 1) as u32;
+    if let Some(existing) = failures.iter_mut().find(|failure| failure.page == page) {
+        existing.recovered |= recovered;
+    } else {
+        failures.push(crate::types::OcrPageFailure {
+            page,
+            error: error.to_string(),
+            recovered,
+        });
+    }
+}
+
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+fn mixed_native_page_has_content(
+    native_text: &str,
+    boundaries: &[crate::types::PageBoundary],
+    page_idx: usize,
+) -> bool {
+    boundaries
+        .iter()
+        .find(|boundary| boundary.page_number == (page_idx + 1) as u32)
+        .and_then(|boundary| native_text.get(boundary.byte_start..boundary.byte_end))
+        .is_some_and(|text| !text.trim().is_empty())
 }
 
 /// Build mixed text from native extraction and per-page OCR results.
@@ -281,6 +313,7 @@ type MixedOcrResult = crate::Result<(
     ahash::AHashMap<u32, crate::types::ImagePreprocessingMetadata>,
     ahash::AHashMap<u32, crate::types::page::PageOcrConfidence>,
     Vec<crate::types::ProcessingWarning>,
+    Vec<crate::types::OcrPageFailure>,
 )>;
 
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
@@ -417,6 +450,7 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
             ahash::AHashMap::new(),
             ahash::AHashMap::new(),
             Vec::new(),
+            Vec::new(),
         ));
     }
 
@@ -447,6 +481,7 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
             Vec::new(),
             ahash::AHashMap::new(),
             ahash::AHashMap::new(),
+            Vec::new(),
             Vec::new(),
         ));
     }
@@ -673,6 +708,7 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
     let mut accumulated_llm_usage: Vec<crate::types::LlmUsage> = Vec::new();
     let mut accumulated_formulas: Vec<crate::types::Formula> = Vec::new();
     let mut accumulated_warnings: Vec<crate::types::ProcessingWarning> = Vec::new();
+    let mut page_failures: Vec<crate::types::OcrPageFailure> = Vec::new();
     let mut failed_page_errors: ahash::AHashMap<usize, crate::XbergError> = ahash::AHashMap::new();
     #[cfg(feature = "layout-detection")]
     {
@@ -726,7 +762,14 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
             config.images.as_ref(),
         );
         for (page_idx, error) in render_failures {
-            push_mixed_ocr_page_failure_warning(&mut accumulated_warnings, page_idx, &error);
+            let recovered = mixed_native_page_has_content(native_text, boundaries, page_idx);
+            push_mixed_ocr_page_failure_warning(
+                &mut accumulated_warnings,
+                &mut page_failures,
+                page_idx,
+                &error,
+                recovered,
+            );
             failed_page_errors.insert(page_idx, error);
         }
 
@@ -823,7 +866,14 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
                         Ok(result) => result,
                         Err(error @ crate::XbergError::Cancelled) => return Err(error),
                         Err(error) => {
-                            push_mixed_ocr_page_failure_warning(&mut accumulated_warnings, page_idx, &error);
+                            let recovered = mixed_native_page_has_content(native_text, boundaries, page_idx);
+                            push_mixed_ocr_page_failure_warning(
+                                &mut accumulated_warnings,
+                                &mut page_failures,
+                                page_idx,
+                                &error,
+                                recovered,
+                            );
                             failed_page_errors.insert(page_idx, error);
                             continue;
                         }
@@ -943,7 +993,14 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
                         Ok(result) => result,
                         Err(error @ crate::XbergError::Cancelled) => return Err(error),
                         Err(error) => {
-                            push_mixed_ocr_page_failure_warning(&mut accumulated_warnings, *page_idx, &error);
+                            let recovered = mixed_native_page_has_content(native_text, boundaries, *page_idx);
+                            push_mixed_ocr_page_failure_warning(
+                                &mut accumulated_warnings,
+                                &mut page_failures,
+                                *page_idx,
+                                &error,
+                                recovered,
+                            );
                             failed_page_errors.insert(*page_idx, error);
                             continue;
                         }
@@ -1468,7 +1525,14 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
             }
             if let Some(error) = failure {
                 if !recovered {
-                    push_mixed_ocr_page_failure_warning(&mut accumulated_warnings, *page_idx, &error);
+                    let native_recovered = mixed_native_page_has_content(native_text, boundaries, *page_idx);
+                    push_mixed_ocr_page_failure_warning(
+                        &mut accumulated_warnings,
+                        &mut page_failures,
+                        *page_idx,
+                        &error,
+                        native_recovered,
+                    );
                     failed_page_errors.insert(*page_idx, error);
                     continue;
                 }
@@ -1487,6 +1551,15 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
                          embedded image XObjects instead."
                     )),
                 });
+                if let Some(existing) = page_failures.iter_mut().find(|failure| failure.page == page_number) {
+                    existing.recovered = true;
+                } else {
+                    page_failures.push(crate::types::OcrPageFailure {
+                        page: page_number,
+                        error: error.to_string(),
+                        recovered: true,
+                    });
+                }
             }
         }
 
@@ -1682,6 +1755,7 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
     }
 
     let result = apply_ocr_page_replacements(native_text, boundaries, &accepted_replacements);
+    page_failures.sort_by_key(|failure| failure.page);
 
     Ok((
         result,
@@ -1693,6 +1767,7 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
         preprocessing_by_page,
         ocr_confidence_by_page,
         accumulated_warnings,
+        page_failures,
     ))
 }
 
@@ -1749,21 +1824,31 @@ pub(crate) async fn extract_full_document_ocr_pipeline_per_page(
         .unwrap_or_default();
     single_block_pages.sort_unstable();
     let (seed_text, boundaries) = full_document_page_seed(page_count, config);
-    let (text, accepted_pages, structured_pages, llm_usage, rasters, formulas, preprocessing, ocr_confidence, warnings) =
-        Box::pin(extract_mixed_ocr_native_with_layout_inputs(
-            &seed_text,
-            &boundaries,
-            MixedOcrPageSelection {
-                ocr: &page_numbers,
-                single_block: &single_block_pages,
-            },
-            content,
-            config,
-            AllPagesFailedPolicy::ReturnError,
-            #[cfg(feature = "layout-detection")]
-            MixedLayoutInputs::Prepared(prepared_layout_inputs),
-        ))
-        .await?;
+    let (
+        text,
+        accepted_pages,
+        structured_pages,
+        llm_usage,
+        rasters,
+        formulas,
+        preprocessing,
+        ocr_confidence,
+        warnings,
+        page_failures,
+    ) = Box::pin(extract_mixed_ocr_native_with_layout_inputs(
+        &seed_text,
+        &boundaries,
+        MixedOcrPageSelection {
+            ocr: &page_numbers,
+            single_block: &single_block_pages,
+        },
+        content,
+        config,
+        AllPagesFailedPolicy::ReturnError,
+        #[cfg(feature = "layout-detection")]
+        MixedLayoutInputs::Prepared(prepared_layout_inputs),
+    ))
+    .await?;
     if config.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()) {
         return Err(crate::XbergError::Cancelled);
     }
@@ -1774,6 +1859,7 @@ pub(crate) async fn extract_full_document_ocr_pipeline_per_page(
         .collect();
     let mut document = crate::types::internal::InternalDocument::new("pdf");
     document.processing_warnings = warnings;
+    document.ocr_page_failures = page_failures;
     merge_structured_ocr_pages_into_internal_document(&mut document, &accepted_pages, &structured_pages);
     let tables = document.tables.clone();
     let ocr_elements = document.prebuilt_ocr_elements.clone().unwrap_or_default();
@@ -2037,6 +2123,11 @@ pub(super) async fn extract_with_ocr_for_page(
     use image::codecs::png::PngEncoder;
     use std::io::Cursor;
 
+    #[cfg(feature = "layout-detection")]
+    let has_layout_detections = layout_detections.is_some();
+    #[cfg(not(feature = "layout-detection"))]
+    let has_layout_detections = false;
+
     // Re-seed the built-in backends if a prior `clear_ocr_backends()` call (a real user API,
     // also exercised by binding e2e suites sharing this process) left the registry without a
     // usable default. Cheap when the default is already present -- see
@@ -2239,7 +2330,7 @@ pub(super) async fn extract_with_ocr_for_page(
         );
     }
 
-    let mut ocr_config_owned = ocr_config.clone();
+    let mut ocr_config_owned = ocr_config_for_page_extraction(ocr_config);
     ocr_config_owned.acceleration = config.acceleration.clone();
     // GH#1554: mirrors `acceleration` above so the full-document scanned-page OCR route
     // inherits the caller's configured decode limits instead of always falling back to
@@ -2344,6 +2435,7 @@ pub(super) async fn extract_with_ocr_for_page(
     // recovered still returns an error.
     let mut page_backend_errors: Vec<(usize, String)> = Vec::new();
     let mut page_failure_warnings: Vec<crate::types::ProcessingWarning> = Vec::new();
+    let mut page_failures: Vec<crate::types::OcrPageFailure> = Vec::new();
     // #1673: page numbers (1-based) whose embedded-image retry ran (attempted at least one
     // image) but the backend returned successfully with empty content on every one of them --
     // the shape every candle VLM backend takes when it silently produces nothing
@@ -2588,7 +2680,7 @@ pub(super) async fn extract_with_ocr_for_page(
                     source_dpi,
                     whole_page_raster,
                     prefer_single_block,
-                    layout_detections.is_some(),
+                    has_layout_detections,
                 )
                 .into_owned();
                 let original_config = ocr_config_owned.clone();
@@ -2721,7 +2813,7 @@ pub(super) async fn extract_with_ocr_for_page(
                     source_dpi,
                     whole_page_raster,
                     prefer_single_block,
-                    layout_detections.is_some(),
+                    has_layout_detections,
                 );
                 #[cfg(feature = "pdf")]
                 let (upright_data, upright_width, upright_height, correction_degrees) = upright_raster_for_backend(
@@ -3015,6 +3107,11 @@ pub(super) async fn extract_with_ocr_for_page(
                             document_page_number
                         )
                     }),
+                });
+                page_failures.push(crate::types::OcrPageFailure {
+                    page: document_page_number,
+                    error: error.clone(),
+                    recovered,
                 });
                 page_backend_errors.push((page_idx, error));
             }
@@ -3549,6 +3646,9 @@ pub(super) async fn extract_with_ocr_for_page(
         warnings.extend(margin_filter_warnings);
         warnings.extend(backend_page_warnings);
         let mut ocr_doc = attach_ocr_fallback_warnings(ocr_doc, &result, warnings);
+        if let Some(doc) = ocr_doc.as_mut() {
+            doc.ocr_page_failures = page_failures;
+        }
         // #1575: only merged when a document already exists (or the warnings step above just
         // built one from `text`) -- forcing an empty document into existence here for the sole
         // purpose of carrying metadata would replace `select_pdf_document`'s `flat_pdf_document`
@@ -4726,6 +4826,43 @@ pub(super) fn ensure_elements_enabled(
         }
     }
     config
+}
+
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn ocr_config_for_page_extraction(config: &crate::core::config::ocr::OcrConfig) -> crate::core::config::ocr::OcrConfig {
+    #[cfg(target_arch = "wasm32")]
+    return config.clone();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if crate::extractors::image::is_mixed_ltr_recovery_eligible_config(config) {
+        ensure_elements_enabled(config)
+    } else {
+        config.clone()
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), any(feature = "ocr", feature = "ocr-pipeline")))]
+mod mixed_ltr_recovery_config_tests {
+    use super::ocr_config_for_page_extraction;
+
+    #[test]
+    fn should_capture_pdf_word_elements_only_for_recovery_eligible_mixed_rtl_config() {
+        let ordinary = crate::core::config::ocr::OcrConfig::default();
+        let mixed_rtl = crate::core::config::ocr::OcrConfig {
+            language: vec!["ara".to_string(), "eng".to_string()],
+            ..Default::default()
+        };
+        let mut explicit_psm = mixed_rtl.clone();
+        explicit_psm.tesseract_config.get_or_insert_default().psm = Some(6);
+
+        assert!(ocr_config_for_page_extraction(&ordinary).element_config.is_none());
+        assert!(
+            ocr_config_for_page_extraction(&mixed_rtl)
+                .element_config
+                .is_some_and(|elements| elements.include_elements)
+        );
+        assert!(ocr_config_for_page_extraction(&explicit_psm).element_config.is_none());
+    }
 }
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 pub(super) fn filter_public_ocr_elements(

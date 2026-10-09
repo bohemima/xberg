@@ -208,8 +208,8 @@ fn auto_ranges(_doc: &ExtractedDocument, _total_pages: u32) -> Result<Vec<RangeI
 /// whole-document result should be distributed across `N` segments:
 ///
 /// - **Page-attributed collections** (`tables`, `images`, `annotations`, `formulas`,
-///   `ocr_elements`, `page_classifications`, `chunks`, `elements`, `uris`,
-///   `form_fields`) are filtered to the items whose page falls in `range`, mirroring
+///   `ocr_elements`, `ocr_page_failures`, `page_classifications`, `chunks`, `elements`,
+///   `uris`, `form_fields`) are filtered to the items whose page falls in `range`, mirroring
 ///   the pre-existing `tables`/`images` behaviour. Items whose page attribution is
 ///   optional and unset (e.g. a `form_field` with `page: None`) cannot be excluded
 ///   safely, so they are included in *every* segment rather than dropped.
@@ -272,6 +272,11 @@ fn sub_document_for_range(
     if let Some(page_structure) = metadata.pages.as_mut() {
         page_structure.total_count = pages.len() as u32;
     }
+    let ocr_page_failures = source.ocr_page_failures().unwrap_or_default();
+    crate::types::extraction::set_ocr_page_failures_metadata(
+        &mut metadata,
+        filter_by_page(&ocr_page_failures, start, end, |failure| failure.page),
+    );
 
     let counts = DocumentCounts {
         pages: pages.len(),
@@ -622,7 +627,7 @@ mod enrichment_preservation_tests {
     use crate::types::summary::{DocumentSummary, SummaryStrategy};
     use crate::types::translation::Translation;
     use crate::types::uri::{ExtractedUri, UriKind};
-    use crate::types::{ExtractedImage, Metadata, Table};
+    use crate::types::{ExtractedImage, Metadata, OcrPageFailure, Table};
 
     fn page(page_number: u32) -> PageContent {
         PageContent {
@@ -779,7 +784,7 @@ mod enrichment_preservation_tests {
     ///
     /// Page 5 deliberately carries no page-attributed enrichment at all.
     fn enriched_doc() -> ExtractedDocument {
-        ExtractedDocument {
+        let mut document = ExtractedDocument {
             content: "whole document".to_string(),
             mime_type: "application/pdf".into(),
             metadata: Metadata {
@@ -912,7 +917,23 @@ mod enrichment_preservation_tests {
             formulas: vec![formula("e=mc^2", 2), formula("a+b", 6)],
             form_fields: vec![form_field("f3", Some(3)), form_field("fnone", None)],
             ..Default::default()
-        }
+        };
+        crate::types::extraction::set_ocr_page_failures_metadata(
+            &mut document.metadata,
+            vec![
+                OcrPageFailure {
+                    page: 2,
+                    error: "backend timed out".to_string(),
+                    recovered: true,
+                },
+                OcrPageFailure {
+                    page: 5,
+                    error: "recognition failed".to_string(),
+                    recovered: false,
+                },
+            ],
+        );
+        document
     }
 
     /// Split [`enriched_doc`] into the three segments 1..=2, 3..=4, 5..=6.
@@ -1437,6 +1458,7 @@ mod enrichment_preservation_tests {
         assert_eq!(out.structured_output, Some(serde_json::json!({ "invoice_total": 42 })));
         assert_eq!(out.children.as_ref().expect("children").len(), 1);
         assert_eq!(out.processing_warnings.len(), 2);
+        assert_eq!(out.ocr_page_failures().unwrap().len(), 2);
         #[cfg(any(feature = "keywords-yake", feature = "keywords-rake"))]
         assert_eq!(out.extracted_keywords.as_ref().expect("keywords").len(), 1);
     }
@@ -1482,6 +1504,14 @@ mod enrichment_preservation_tests {
         assert_eq!(out.quality_score, Some(0.75));
         assert_eq!(out.summary.as_ref().expect("summary").text, "a summary");
         assert_eq!(out.processing_warnings.len(), 2);
+        assert_eq!(
+            out.ocr_page_failures().unwrap(),
+            vec![OcrPageFailure {
+                page: 5,
+                error: "recognition failed".to_string(),
+                recovered: false,
+            }]
+        );
         assert_eq!(out.entities, None);
         assert!(out.llm_usage.is_none());
     }

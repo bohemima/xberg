@@ -309,6 +309,10 @@ pub struct InternalDocument {
     /// Non-fatal warnings collected during extraction.
     pub processing_warnings: Vec<crate::types::ProcessingWarning>,
 
+    /// Structured OCR backend failures collected while extracting PDF pages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ocr_page_failures: Vec<crate::types::OcrPageFailure>,
+
     /// PDF annotations (links, highlights, notes).
     pub annotations: Option<Vec<crate::types::annotations::PdfAnnotation>>,
 
@@ -442,8 +446,13 @@ impl From<crate::types::extraction::ExtractedDocument> for InternalDocument {
     /// flat element list, the relationship graph, and `DocumentStructure` cannot be
     /// reconstructed from `ExtractedDocument`, which is why `pre_rendered_content`
     /// carries the text.
-    fn from(result: crate::types::extraction::ExtractedDocument) -> Self {
+    fn from(mut result: crate::types::extraction::ExtractedDocument) -> Self {
         let extraction_method = result.extraction_method;
+        let ocr_page_failures = result.ocr_page_failures().unwrap_or_default();
+        result
+            .metadata
+            .additional
+            .remove(crate::types::extraction::OCR_PAGE_FAILURES_METADATA_KEY);
         let mut doc = Self::new(result.mime_type.as_ref());
         doc.mime_type = result.mime_type.into_owned();
         doc.metadata = result.metadata;
@@ -459,6 +468,7 @@ impl From<crate::types::extraction::ExtractedDocument> for InternalDocument {
         doc.children = result.children;
         doc.annotations = result.annotations;
         doc.processing_warnings = result.processing_warnings;
+        doc.ocr_page_failures = ocr_page_failures;
         doc.llm_usage = result.llm_usage;
         doc.prebuilt_pages = result.pages;
         doc.prebuilt_ocr_elements = result.ocr_elements;
@@ -499,6 +509,7 @@ impl InternalDocument {
             children: None,
             mime_type: "application/octet-stream".to_string(),
             processing_warnings: Vec::new(),
+            ocr_page_failures: Vec::new(),
             annotations: None,
             prebuilt_pages: None,
             pre_rendered_content: None,

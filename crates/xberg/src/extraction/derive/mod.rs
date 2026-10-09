@@ -911,8 +911,10 @@ pub fn derive_extraction_result(
 
     let images = if doc.images.is_empty() { None } else { Some(doc.images) };
 
-    let extraction_method = doc
-        .metadata
+    let mut metadata = doc.metadata;
+    crate::types::extraction::set_ocr_page_failures_metadata(&mut metadata, std::mem::take(&mut doc.ocr_page_failures));
+
+    let extraction_method = metadata
         .additional
         .get("extraction_method")
         .and_then(serde_json::Value::as_str)
@@ -926,7 +928,7 @@ pub fn derive_extraction_result(
     ExtractedDocument {
         content,
         mime_type,
-        metadata: doc.metadata,
+        metadata,
         extraction_method,
         tables: doc.tables,
         images,

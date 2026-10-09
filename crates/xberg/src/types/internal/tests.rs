@@ -233,7 +233,6 @@ fn should_round_trip_through_serde_json() {
     assert_eq!(restored.mime_type, doc.mime_type);
     assert_eq!(restored.elements.len(), doc.elements.len());
     assert_eq!(restored.relationships.len(), doc.relationships.len());
-
     assert_eq!(restored.elements[0].kind, ElementKind::Title);
     assert_eq!(restored.elements[1].kind, ElementKind::Heading { level: 2 });
     assert_eq!(restored.elements[4].kind, ElementKind::ListItem { ordered: true });
@@ -254,6 +253,51 @@ fn should_round_trip_through_serde_json() {
     assert_eq!(restored.elements[0].id, doc.elements[0].id);
 
     assert_eq!(restored.elements[0].layer, ContentLayer::Body);
+}
+
+#[test]
+fn should_preserve_ocr_page_failures_across_public_internal_conversion() {
+    let expected = crate::types::OcrPageFailure {
+        page: 7,
+        error: "backend timed out".to_string(),
+        recovered: false,
+    };
+    let mut public = crate::types::ExtractedDocument {
+        content: "partial text".to_string(),
+        mime_type: "application/pdf".into(),
+        ..Default::default()
+    };
+    crate::types::extraction::set_ocr_page_failures_metadata(&mut public.metadata, vec![expected.clone()]);
+
+    let internal = InternalDocument::from(public);
+    assert_eq!(internal.ocr_page_failures, vec![expected.clone()]);
+
+    let round_tripped = crate::types::ExtractedDocument::from(internal);
+    assert_eq!(round_tripped.ocr_page_failures().unwrap(), vec![expected]);
+}
+
+#[test]
+fn internal_document_omitting_ocr_page_failures_defaults_to_empty() {
+    let value = serde_json::to_value(InternalDocument::new("pdf")).unwrap();
+    assert_eq!(value.get("ocr_page_failures"), None);
+
+    let restored: InternalDocument = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.ocr_page_failures, Vec::<crate::types::OcrPageFailure>::new());
+}
+
+#[test]
+fn internal_document_round_trips_ocr_page_failures() {
+    let mut document = InternalDocument::new("pdf");
+    document.ocr_page_failures.push(crate::types::OcrPageFailure {
+        page: 3,
+        error: "recognition failed".to_string(),
+        recovered: true,
+    });
+
+    let json = serde_json::to_string(&document).unwrap();
+    let restored: InternalDocument = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(restored.ocr_page_failures, document.ocr_page_failures);
 }
 
 /// Cover all 27 `ElementKind` variants through a serde JSON round-trip.

@@ -2067,6 +2067,8 @@ impl PdfExtractor {
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
         let mut ocr_fallback_warnings: Vec<crate::types::ProcessingWarning> = Vec::new();
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+        let mut ocr_page_failures: Vec<crate::types::OcrPageFailure> = Vec::new();
+        #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
         #[allow(unused_assignments)]
         let mut ocr_layout_gate_audit: OcrLayoutGateDecisions = (None, None);
 
@@ -2159,6 +2161,7 @@ impl PdfExtractor {
                             mixed_preprocessing,
                             mixed_ocr_confidence,
                             mixed_warnings,
+                            mixed_page_failures,
                         ) = ocr::extract_mixed_ocr_native_with_single_block_pages(
                             &native_text,
                             bounds,
@@ -2179,6 +2182,7 @@ impl PdfExtractor {
                         }
                         ocr_preprocessing_by_page.extend(mixed_preprocessing);
                         ocr_confidence_by_page.extend(mixed_ocr_confidence);
+                        ocr_page_failures.extend(mixed_page_failures);
                         ocr_fallback_warnings.extend(mixed_warnings);
                         (mixed, extraction_method)
                     } else {
@@ -2235,6 +2239,7 @@ impl PdfExtractor {
                         mixed_preprocessing,
                         mixed_ocr_confidence,
                         mixed_warnings,
+                        mixed_page_failures,
                     )) => {
                         // `Mixed` must mean "OCR contributed text", not "OCR was attempted". When
                         // every candidate page was rejected (blank render, failed decode, empty
@@ -2259,6 +2264,7 @@ impl PdfExtractor {
                         }
                         ocr_preprocessing_by_page.extend(mixed_preprocessing);
                         ocr_confidence_by_page.extend(mixed_ocr_confidence);
+                        ocr_page_failures.extend(mixed_page_failures);
                         ocr_fallback_warnings.extend(mixed_warnings);
                         if ocr_contributed {
                             (mixed, mixed_method)
@@ -2499,6 +2505,7 @@ impl PdfExtractor {
                                 mixed_preprocessing,
                                 mixed_ocr_confidence,
                                 mixed_warnings,
+                                mixed_page_failures,
                             )) => {
                                 let extraction_method = extraction_method_after_mixed_ocr(&results_map);
                                 ocr_llm_usage = mixed_llm_usage;
@@ -2510,6 +2517,7 @@ impl PdfExtractor {
                                 }
                                 ocr_preprocessing_by_page.extend(mixed_preprocessing);
                                 ocr_confidence_by_page.extend(mixed_ocr_confidence);
+                                ocr_page_failures.extend(mixed_page_failures);
                                 ocr_fallback_warnings.extend(mixed_warnings);
                                 (mixed, extraction_method)
                             }
@@ -2748,6 +2756,8 @@ impl PdfExtractor {
 
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
         doc.processing_warnings.append(&mut ocr_fallback_warnings);
+        #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+        doc.ocr_page_failures.append(&mut ocr_page_failures);
 
         doc.processing_warnings.append(&mut pdf_extraction_warnings);
 
@@ -5758,6 +5768,10 @@ mod tests {
             "the native page text must survive: {}",
             internal.content()
         );
+        assert_eq!(internal.ocr_page_failures.len(), 1);
+        assert_eq!(internal.ocr_page_failures[0].page, 2);
+        assert!(internal.ocr_page_failures[0].error.contains(FAILURE));
+        assert!(!internal.ocr_page_failures[0].recovered);
         let warnings = internal
             .processing_warnings
             .iter()
