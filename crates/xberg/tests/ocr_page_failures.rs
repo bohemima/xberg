@@ -350,10 +350,10 @@ fn a_directly_called_backend_records_the_page_recovered_as_a_table() {
     assert_eq!(result.ocr_page_failures, Some(recovered_page_two()));
 }
 
-/// The whole-document route (`force_ocr`) carries the record of the recovered page too.
+/// The whole-document route (`force_ocr`) records every failed page and its recovery state.
 #[test]
 #[serial_test::serial]
-fn a_whole_document_run_records_the_recovered_page() {
+fn a_whole_document_run_records_every_failed_page() {
     let config = ExtractionConfig {
         ocr: Some(OcrConfig {
             backend: "tesseract".to_string(),
@@ -366,5 +366,19 @@ fn a_whole_document_run_records_the_recovered_page() {
     };
     let result = extract(RenderOutcome::Fails, &config);
     assert_recovered(&result, FAILED_AND_RECOVERED_WARNING);
-    assert_eq!(result.ocr_page_failures, Some(recovered_page_two()));
+    assert_eq!(
+        result.ocr_page_failures,
+        Some(vec![
+            OcrPageFailure {
+                page: 1,
+                error: "OCR error: stub render failure".to_string(),
+                recovered: false,
+            },
+            OcrPageFailure {
+                page: 2,
+                error: "OCR error: stub render failure".to_string(),
+                recovered: true,
+            },
+        ])
+    );
 }

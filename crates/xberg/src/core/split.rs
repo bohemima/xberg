@@ -1509,7 +1509,6 @@ mod enrichment_preservation_tests {
                 recovered: false,
             }])
         );
-        // Pages 3 and 4 have no failed page: the segment has `None`, not an empty list.
         let without_failures = segment(&source, 3..=4, false);
         assert_eq!(without_failures.document.ocr_page_failures, None);
         assert_eq!(out.entities, None);

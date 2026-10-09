@@ -448,8 +448,8 @@ pub struct ExtractedDocument {
     /// Pages whose OCR failed while extraction continued, in the order the failures were reported.
     ///
     /// A record with `recovered` set means the document still has content for that page
-    /// from native text or from embedded images. `None` when no page failed; the list is
-    /// never empty.
+    /// from native text or from embedded images. Xberg-produced results use `None` when
+    /// no page failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     #[cfg_attr(feature = "alef-meta", alef(since = "1.3.7"))]
