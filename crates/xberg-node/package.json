@@ -30,9 +30,10 @@
     ]
   },
   "scripts": {
-    "build": "npx --yes -p @napi-rs/cli@^3.7.3 napi build --platform --release",
-    "artifacts": "npx --yes -p @napi-rs/cli@^3.7.3 napi artifacts",
-    "prepublishOnly": "npx --yes -p @napi-rs/cli@^3.7.3 napi prepublish -t npm --skip-optional-publish"
+    "build": "napi build --platform --release",
+    "artifacts": "napi artifacts",
+    "test": "node --test tests/*.test.mjs",
+    "prepublishOnly": "napi prepublish -t npm --skip-optional-publish"
   },
   "engines": {
     "node": ">= 22"
