@@ -62,7 +62,7 @@ chrono = "0.4"
 clap = { version = "4.6", features = ["derive", "color", "suggestions"] }
 comrak = { version = "0.56", default-features = false }
 console_error_panic_hook = "0.1"
-crawlberg = { version = "1.10.2", default-features = false }
+crawlberg = { version = "1.10.3", default-features = false }
 criterion = { version = "0.8", features = ["html_reports"] }
 dbase = "0.8"
 flate2 = "1.1"
@@ -76,7 +76,7 @@ itertools = "0.15"
 js-sys = "0.3"
 
 lazy_static = "1.5.1"
-# ~keep Crawlberg 1.10.1 pins libc 0.2.189 on iOS until sysinfo supports the 0.2.190 Mach API change.
+# ~keep Crawlberg 1.10.3's browser stack requires libc 0.2.189 for iOS Mach API compatibility.
 libc = "0.2.189"
 # Builds a bundled zlib from source (`static`) for the target, so the vendored
 # librevenge RVNGZipStream.cpp can `#include <zlib.h>` and link zlib even under
@@ -135,7 +135,7 @@ tokio = { version = "1.53.2", features = [
     "time",
     "io-util",
 ] }
-toml = "1.1.7"
+toml = "1.1.8"
 tracing = "0.1"
 # Pure-Rust ONNX inference engine (Sonos). Alternative InferenceBackend to `ort` on
 # no-ORT targets (wasm32, x86_64-linux-android). The ONNX frontend crate is CPU-only
